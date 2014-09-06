@@ -1,0 +1,8 @@
+(* OASIS_START *)
+(* DO NOT EDIT (digest: c4a242b7df968aff8c9163b0890489cb) *)
+
+Authors of lwt_comm:
+
+* Dmitry Grebeniuk <gdsfh1@gmail.com>
+
+(* OASIS_STOP *)

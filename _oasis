@@ -1,0 +1,13 @@
+OASISFormat: 0.4
+Name:        lwt_comm
+Version:     0.1
+Synopsis:    Lwt library used to implement typed bidirectional servers within process, and extend them to tcp/ip servers
+Authors:     Dmitry Grebeniuk <gdsfh1@gmail.com>
+License:     LGPL-2.1 with OCaml linking exception
+Plugins:     META (0.4), StdFiles (0.4), DevFiles (0.4)
+
+Library lwt_comm
+  Path:       lib
+  BuildTools: ocamlbuild
+  Modules:    Lwt_comm
+  
