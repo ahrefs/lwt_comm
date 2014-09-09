@@ -108,13 +108,14 @@ type ('req, 'resp, 'k) unix_func =
 let run_unix_server
  (server : ('req, 'resp, [> `Bidi] as 'k) server)
  sock_domain sock_type proto sock_addr
+ ?(listen = 5)
  (func : ('req, 'resp, 'k) unix_func)
  =
   ignore_result begin try_lwt begin
     let sock = Lwt_unix.socket sock_domain sock_type proto in
     Lwt_unix.setsockopt sock Unix.SO_REUSEADDR true;
     Lwt_unix.bind sock sock_addr;
-    Lwt_unix.listen sock 5;
+    Lwt_unix.listen sock listen;
     let rec loop () =
       lwt (fd, _addr) = Lwt_unix.accept sock in
       let conn = connect server in

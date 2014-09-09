@@ -73,6 +73,7 @@ val run_unix_server :
   ('req, 'resp, [> `Bidi | `Connect] as 'k) server ->
   Lwt_unix.socket_domain -> Lwt_unix.socket_type -> int (* proto; 0 *) ->
   Lwt_unix.sockaddr ->
+  ?listen:int ->
   ('req, 'resp, 'k) unix_func ->
   unit
 
