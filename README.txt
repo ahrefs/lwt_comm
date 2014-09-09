@@ -1,8 +1,8 @@
 (* OASIS_START *)
-(* DO NOT EDIT (digest: 3fa7d093cde91f61e827ae96b6365f5a) *)
+(* DO NOT EDIT (digest: 11b76379646a9e1122d109a883e8ff64) *)
 
-lwt_comm - ...
-==============
+lwt_comm - Lwt library used to implement typed bidirectional servers within process, and extend them to tcp/ip servers
+======================================================================================================================
 
 See the file [INSTALL.txt](INSTALL.txt) for building and installation
 instructions.

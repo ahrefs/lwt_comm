@@ -5,9 +5,16 @@ Synopsis:    Lwt library used to implement typed bidirectional servers within pr
 Authors:     Dmitry Grebeniuk <gdsfh1@gmail.com>
 License:     LGPL-2.1 with OCaml linking exception
 Plugins:     META (0.4), StdFiles (0.4), DevFiles (0.4)
+BuildTools: ocamlbuild
+BuildDepends: lwt, lwt.unix, lwt_mq
 
 Library lwt_comm
   Path:       lib
   BuildTools: ocamlbuild
   Modules:    Lwt_comm
   
+Executable linenum_server
+  Path: tests
+  MainIs: linenum_server.ml
+  BuildDepends: lwt_comm
+  Install: false

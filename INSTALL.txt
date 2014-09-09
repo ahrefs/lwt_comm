@@ -1,5 +1,5 @@
 (* OASIS_START *)
-(* DO NOT EDIT (digest: ba5ec2d6a0b7070fdc829acec7e8d171) *)
+(* DO NOT EDIT (digest: db1d2a188b89459d455516d7786bca49) *)
 
 This is the INSTALL file for the lwt_comm distribution.
 
@@ -12,6 +12,8 @@ Dependencies
 In order to compile this package, you will need:
                                                 * ocaml
                                                 * findlib
+                                                * lwt
+                                                * lwt_mq
 
 Installing
 ==========
