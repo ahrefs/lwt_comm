@@ -144,9 +144,17 @@ let ch_of_fd fd =
 
 let don't_setup_fd (_ : Lwt_unix.file_descr) = return_unit
 
+let do_nothing_on_server_close
+ (_ : Lwt_io.input_channel)
+ (_ : Lwt_io.output_channel)
+ (_ : exn)
+  =
+   return_unit
+
 (* req_of_bytes can throw End_of_file to indicate closing *)
 let unix_func_of_maps
  ?(setup_fd = don't_setup_fd)
+ ?(on_server_close = do_nothing_on_server_close)
  req_from_inch resp_to_outch =
   fun conn fd ->
     try_lwt
@@ -184,17 +192,12 @@ let unix_func_of_maps
               | `From_inch None ->
                   shutdown conn Unix.SHUTDOWN_SEND;
                   return ths
-              | `From_conn (`Error End_of_file) ->
+              | `From_conn (`Error exn) ->
+                  lwt () = on_server_close inch outch exn in
                   lwt () = Lwt_io.flush outch in
-                  Lwt_unix.shutdown fd Unix.SHUTDOWN_SEND;
-                  return ths
-              | `From_conn (`Error _e) ->
-                  failwith "from_conn / error"
-                  (*
-                  lwt () = Lwt_io.flush outch in
-                  Lwt_unix.shutdown fd Unix.SHUTDOWN_SEND;
-                  return ths
-                  *)
+                  Lwt_unix.shutdown fd Unix.SHUTDOWN_ALL;
+                  return_nil
+                  (* fd will be closed by run_unix_server *)
             end
             running
             ready

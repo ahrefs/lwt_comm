@@ -85,6 +85,8 @@ val run_unix_server :
  *)
 val unix_func_of_maps :
   ?setup_fd : (Lwt_unix.file_descr -> unit Lwt.t) ->
+  ?on_server_close:
+    (Lwt_io.input_channel -> Lwt_io.output_channel -> exn -> unit Lwt.t) ->
   (Lwt_io.input_channel -> 'req Lwt.t) ->
   (Lwt_io.output_channel -> 'resp -> unit Lwt.t) ->
   ('req, 'resp, 'k) unix_func
