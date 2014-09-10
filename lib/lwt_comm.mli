@@ -79,9 +79,12 @@ val run_unix_server :
 
 (** Creates [unix_func] for simple cases: when protocol on sockets maps 1:1
     to protocol on [server].
+    [?setup_fd] is called before creating Lwt_io channels, used to set up
+    socket-specific options.
     Unhandled exceptions are currently dumped to stderr.
  *)
 val unix_func_of_maps :
+  ?setup_fd : (Lwt_unix.file_descr -> unit Lwt.t) ->
   (Lwt_io.input_channel -> 'req Lwt.t) ->
   (Lwt_io.output_channel -> 'resp -> unit Lwt.t) ->
   ('req, 'resp, 'k) unix_func

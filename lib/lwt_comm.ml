@@ -142,10 +142,15 @@ end
 let ch_of_fd fd =
   (Lwt_io.of_fd ~mode:Lwt_io.input fd, Lwt_io.of_fd ~mode:Lwt_io.output fd)
 
+let don't_setup_fd (_ : Lwt_unix.file_descr) = return_unit
+
 (* req_of_bytes can throw End_of_file to indicate closing *)
-let unix_func_of_maps req_from_inch resp_to_outch =
+let unix_func_of_maps
+ ?(setup_fd = don't_setup_fd)
+ req_from_inch resp_to_outch =
   fun conn fd ->
     try_lwt
+      lwt () = setup_fd fd in
       let (inch, outch) = ch_of_fd fd in
       let make_inch_reader () =
         lwt req_opt =
