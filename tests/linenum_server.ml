@@ -1,7 +1,7 @@
 open Lwt
 module C = Lwt_comm
 
-let linenum_server = C.duplex begin fun conn ->
+let (linenum_server, _server_ctl) = C.duplex begin fun conn ->
   let rec loop n =
     match_lwt C.recv_opt conn with
     | None -> C.close conn; return_unit

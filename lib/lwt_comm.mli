@@ -11,6 +11,15 @@
  *)
 type ('req, 'resp, 'kind) server
 
+(** Type of value used to control server: for now, it's possible to shutdown
+    server and to wait for server shutdown using value of this type.
+    This functionality is separated from values of type [server], since there
+    may exist code that should be able to only connect to server, but not to
+    shutdown it, and this privileges can be separated by hiding [server_ctl]
+    value from code that shouldn't be able to control server.
+ *)
+type server_ctl
+
 (** Type that represents connection to in-process server or client.
     Values of type ['snd] are sent to connection, values of type ['rcv] are
     received.
@@ -45,7 +54,7 @@ val close : ?exn:exn -> ('snd, 'rcv, 'kind) conn -> unit
  *)
 val duplex :
   (('resp, 'req, [`Bidi | `Connect] as 'k) conn -> unit Lwt.t) ->
-  ('req, 'resp, 'k) server
+  (('req, 'resp, 'k) server * server_ctl)
 
 val connect :
   ('req, 'resp, [> `Connect] as 'k) server ->
@@ -55,6 +64,20 @@ val connect :
 val with_connection :
   ('req, 'resp, [> `Connect] as 'k) server ->
   (('req, 'resp, 'k) conn -> 'a Lwt.t) -> 'a Lwt.t
+
+exception Server_shut_down
+
+(** Shutdown server: future [connect]s will raise [?exn] (default exception is
+    [Server_shut_down].
+    Server's on_shutdown is executed when server is shut down.
+ *)
+val shutdown_server : ?exn:exn -> server_ctl -> unit Lwt.t
+
+(** Wait for server's shutdown without trying to shut down server.
+    When [wait_for_server_shutdown] returns, server's on_shutdown is already
+    executed.
+ *)
+val wait_for_server_shutdown : server_ctl -> unit Lwt.t
 
 (** Type of layer between [server] and tcp/ip socket.
     This function takes [conn] and file descriptor, and passes messages back
@@ -68,6 +91,7 @@ type ('req, 'resp, 'k) unix_func =
     [unix_func conn fd] that parses bytes from socket and sends typed requests
     to [server], and outputs [server] responses to socket.
     Unhandled exceptions are currently dumped to stderr.
+    Listening for connections stops when [server] is shut down.
  *)
 val run_unix_server :
   ('req, 'resp, [> `Bidi | `Connect] as 'k) server ->

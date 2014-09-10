@@ -10,8 +10,20 @@ type ('snd, 'rcv, 'kind) conn =
   ; rcv : 'rcv link
   }
 
+type server_state =
+| Ss_running
+| Ss_closed of exn
+
+type server_ctl =
+  { sc_shtd_waiter : unit Lwt.t
+  ; sc_shtd : unit Lazy.t
+  ; mutable sc_state : server_state
+  }
+
 type ('req, 'resp, 'kind) server =
-  ('resp, 'req, 'kind) conn -> unit Lwt.t
+  { shandler : ('resp, 'req, 'kind) conn -> unit Lwt.t
+  ; sctl : server_ctl
+  }
 
 let send_link l s =
   Lwt_mq.put l.lmq s
@@ -69,14 +81,36 @@ let shutdown ?(exn = End_of_file) conn cmd =
 let close ?(exn = End_of_file) conn =
   shutdown ~exn conn Unix.SHUTDOWN_ALL
 
-let duplex serverfunc = serverfunc
+let duplex serverfunc =
+  let sctl =
+    let (wt, wk) = Lwt.wait () in
+    { sc_shtd_waiter = wt
+    ; sc_shtd = lazy (Lwt.wakeup wk ())
+    ; sc_state = Ss_running
+    }
+  in
+  ( { shandler = serverfunc
+    ; sctl = sctl
+    }
+  , sctl
+  )
+
+exception Server_shut_down
+
+let shutdown_server ?(exn = Server_shut_down) sctl =
+  sctl.sc_state <- Ss_closed exn;
+  Lazy.force sctl.sc_shtd;
+  sctl.sc_shtd_waiter
+
+let wait_for_server_shutdown sctl =
+  sctl.sc_shtd_waiter
 
 let link () =
   { lmq = Lwt_mq.create (); lclosed = false }
 
-let run_lwt_server serverfunc server_conn =
+let run_lwt_server server server_conn =
   try_lwt
-    lwt () = serverfunc server_conn in
+    lwt () = server.shandler server_conn in
     close server_conn;
     return_unit
   with exn ->
@@ -87,12 +121,15 @@ let connect
  : ('req, 'resp, [> `Connect] as 'k) server ->
    ('req, 'resp, 'k) conn
  = fun server ->
-  let req_link = link ()
-  and resp_link = link () in
-  let server_conn = { snd = resp_link; rcv = req_link }
-  and client_conn = { snd = req_link; rcv = resp_link } in
-  Lwt.ignore_result (run_lwt_server server server_conn);
-  client_conn
+  match server.sctl.sc_state with
+  | Ss_running ->
+      let req_link = link ()
+      and resp_link = link () in
+      let server_conn = { snd = resp_link; rcv = req_link }
+      and client_conn = { snd = req_link; rcv = resp_link } in
+      Lwt.ignore_result (run_lwt_server server server_conn);
+      client_conn
+  | Ss_closed exn -> raise exn
 
 let with_connection server func =
   let client_conn = connect server in
@@ -116,22 +153,46 @@ let run_unix_server
     Lwt_unix.setsockopt sock Unix.SO_REUSEADDR true;
     Lwt_unix.bind sock sock_addr;
     Lwt_unix.listen sock listen;
-    let rec loop () =
-      lwt (fd, _addr) = Lwt_unix.accept sock in
-      let conn = connect server in
-      ignore_result begin
-        (* Printf.eprintf "run unix server: 0\n%!"; *)
-        lwt () = func conn fd in
-        (* Printf.eprintf "run unix server: 1\n%!"; *)
-        close conn;
-        (* Printf.eprintf "run unix server: 2\n%!"; *)
-        lwt () = Lwt_unix.close fd in
-        (* Printf.eprintf "run unix server: 3\n%!"; *)
-        return_unit
-      end;
-      loop ()
+    let shutdown_waiter =
+      lwt () = server.sctl.sc_shtd_waiter in
+      return `Shutdown
     in
-      loop ()
+    let rec loop () =
+      lwt ready = nchoose
+        [ begin
+            lwt (fd, _addr) = Lwt_unix.accept sock in
+            return (`Accepted fd)
+          end
+        ; shutdown_waiter
+        ] in
+      let stop_now =
+        List.fold_left
+          (fun stop_now -> function
+           | `Accepted fd ->
+               let conn = connect server in
+               ignore_result begin
+                 (* Printf.eprintf "run unix server: 0\n%!"; *)
+                 lwt () = func conn fd in
+                 (* Printf.eprintf "run unix server: 1\n%!"; *)
+                 close conn;
+                 (* Printf.eprintf "run unix server: 2\n%!"; *)
+                 lwt () = Lwt_unix.close fd in
+                 (* Printf.eprintf "run unix server: 3\n%!"; *)
+                 return_unit
+               end;
+               stop_now
+           | `Shutdown ->
+               true
+          )
+          false
+          ready
+      in
+        if stop_now
+        then return_unit
+        else loop ()
+    in
+      lwt () = loop () in
+      Lwt_unix.close sock
   end
   with e ->
     Printf.eprintf "run unix server exn: %s\n%!"
