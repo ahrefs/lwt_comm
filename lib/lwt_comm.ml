@@ -176,7 +176,11 @@ let run_unix_server
                  (* Printf.eprintf "run unix server: 1\n%!"; *)
                  close conn;
                  (* Printf.eprintf "run unix server: 2\n%!"; *)
-                 lwt () = Lwt_unix.close fd in
+                 lwt () =
+                   if Lwt_unix.state fd = Lwt_unix.Closed
+                   then return_unit
+                   else Lwt_unix.close fd
+                 in
                  (* Printf.eprintf "run unix server: 3\n%!"; *)
                  return_unit
                end;
@@ -255,8 +259,15 @@ let unix_func_of_maps
                   return ths
               | `From_conn (`Error exn) ->
                   lwt () = on_server_close inch outch exn in
-                  lwt () = Lwt_io.flush outch in
-                  Lwt_unix.shutdown fd Unix.SHUTDOWN_ALL;
+                  lwt () =
+                    if Lwt_unix.state fd = Lwt_unix.Opened
+                    then
+                      lwt () = Lwt_io.flush outch in
+                      Lwt_unix.shutdown fd Unix.SHUTDOWN_ALL;
+                      return_unit
+                    else
+                      return_unit
+                  in
                   return_nil
                   (* fd will be closed by run_unix_server *)
             end
