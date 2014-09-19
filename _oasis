@@ -18,3 +18,9 @@ Executable linenum_server
   MainIs: linenum_server.ml
   BuildDepends: lwt_comm
   Install: false
+  
+Executable linenum_client
+  Path: tests
+  MainIs: linenum_client.ml
+  BuildDepends: lwt_comm
+  Install: false

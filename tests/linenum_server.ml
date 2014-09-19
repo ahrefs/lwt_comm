@@ -1,5 +1,5 @@
 open Lwt
-module C = Lwt_comm
+open Linenum_common
 
 let (linenum_server, _server_ctl) = C.duplex begin fun conn ->
   let rec loop n =
@@ -16,7 +16,7 @@ end
 let ch_of_fd fd =
   (Lwt_io.of_fd ~mode:Lwt_io.input fd, Lwt_io.of_fd ~mode:Lwt_io.output fd)
 
-let linenum_unix_serverfunc conn fd =
+let linenum_unix_serverfunc_manually conn fd =
   let (inch, outch) = ch_of_fd fd in
   let rec loop () =
     let line_opt =
@@ -38,11 +38,6 @@ let linenum_unix_serverfunc conn fd =
         loop ()
   in
     loop ()
-
-let linenum_unix_serverfunc2 : (_, _, [`Connect | `Bidi]) C.unix_func =
-  C.unix_func_of_maps
-    Lwt_io.read_line
-    Lwt_io.write_line
 
 let () = Lwt_main.run begin
   try_lwt

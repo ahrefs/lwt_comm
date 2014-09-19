@@ -129,3 +129,9 @@ val unix_func_of_maps :
   (Lwt_io.input_channel -> 'req Lwt.t) ->
   (Lwt_io.output_channel -> 'resp -> unit Lwt.t) ->
   ('req, 'resp, 'k) unix_func
+
+val connect_unix :
+  ('resp, 'req, [> `Bidi | `Connect ] as 'k) unix_func ->
+  Lwt_unix.socket_domain -> Lwt_unix.socket_type -> int (* proto; 0 *) ->
+  Lwt_unix.sockaddr ->
+  ('req, 'resp, 'k) conn Lwt.t

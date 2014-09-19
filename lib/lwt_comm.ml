@@ -163,6 +163,13 @@ let run_lwt_server server server_conn =
     close server_conn ~exn;
     return_unit
 
+let conn_pair ~ack_req ~ack_resp =
+  let req_link = link ack_req
+  and resp_link = link ack_resp in
+  let server_conn = { snd = resp_link; rcv = req_link }
+  and client_conn = { snd = req_link; rcv = resp_link } in
+  (server_conn, client_conn)
+
 let connect
  : ?ack_req:bool -> ?ack_resp:bool ->
    ('req, 'resp, [> `Connect] as 'k) server ->
@@ -170,10 +177,7 @@ let connect
  = fun ?(ack_req = true) ?(ack_resp = true) server ->
   match server.sctl.sc_state with
   | Ss_running ->
-      let req_link = link ack_req
-      and resp_link = link ack_resp in
-      let server_conn = { snd = resp_link; rcv = req_link }
-      and client_conn = { snd = req_link; rcv = resp_link } in
+      let (server_conn, client_conn) = conn_pair ~ack_req ~ack_resp in
       Lwt.ignore_result (run_lwt_server server server_conn);
       client_conn
   | Ss_closed exn -> raise exn
@@ -188,6 +192,22 @@ let with_connection server func =
 
 type ('req, 'resp, 'k) unix_func =
   ('req, 'resp, 'k) conn -> Lwt_unix.file_descr -> unit Lwt.t
+
+let run_unix_func func conn fd =
+  ignore_result begin
+    (* Printf.eprintf "run unix func: 0\n%!"; *)
+    lwt () = func conn fd in
+    (* Printf.eprintf "run unix func: 1\n%!"; *)
+    close conn;
+    (* Printf.eprintf "run unix func: 2\n%!"; *)
+    lwt () =
+      if Lwt_unix.state fd = Lwt_unix.Closed
+      then return_unit
+      else Lwt_unix.close fd
+    in
+    (* Printf.eprintf "run unix func: 3\n%!"; *)
+    return_unit
+  end
 
 let run_unix_server
  (server : ('req, 'resp, [> `Bidi] as 'k) server)
@@ -217,20 +237,7 @@ let run_unix_server
           (fun stop_now -> function
            | `Accepted fd ->
                let conn = connect ~ack_resp:true ~ack_req:false server in
-               ignore_result begin
-                 (* Printf.eprintf "run unix server: 0\n%!"; *)
-                 lwt () = func conn fd in
-                 (* Printf.eprintf "run unix server: 1\n%!"; *)
-                 close conn;
-                 (* Printf.eprintf "run unix server: 2\n%!"; *)
-                 lwt () =
-                   if Lwt_unix.state fd = Lwt_unix.Closed
-                   then return_unit
-                   else Lwt_unix.close fd
-                 in
-                 (* Printf.eprintf "run unix server: 3\n%!"; *)
-                 return_unit
-               end;
+               run_unix_func func conn fd;
                stop_now
            | `Shutdown ->
                true
@@ -343,3 +350,10 @@ let unix_func_of_maps
       Printf.eprintf "unix func of maps: %s\n%!"
         (Printexc.to_string e);
       return_unit
+
+let connect_unix unix_func sock_domain sock_type proto sock_addr =
+  let sock = Lwt_unix.socket sock_domain sock_type proto in
+  lwt () = Lwt_unix.connect sock sock_addr in
+  let (server_conn, client_conn) = conn_pair ~ack_req:true ~ack_resp:false in
+  run_unix_func unix_func server_conn sock;
+  return client_conn
