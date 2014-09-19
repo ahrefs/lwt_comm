@@ -1,17 +1,19 @@
 open Lwt
+module M = Lwt_mq_map
 
-type 'a mq =
-| Acks of ('a * unit Lwt.u) Lwt_mq.t
-| No_acks of 'a Lwt_mq.t
+type -'a mq_sink =
+| Si_Acks of ('a * unit Lwt.u) M.sink
+| Si_No_acks of 'a M.sink
 
-type 'a link =
-  { lmq : 'a mq
-  ; mutable lclosed : bool
-  }
+type +'a mq_source =
+| So_Acks of ('a * unit Lwt.u) M.source
+| So_No_acks of 'a M.source
 
-type ('snd, 'rcv, 'kind) conn =
-  { snd : 'snd link
-  ; rcv : 'rcv link
+type (-'snd, +'rcv, 'kind) conn =
+  { snd_sink : 'snd mq_sink
+  ; snd_closed : bool ref
+  ; rcv_source : 'rcv mq_source
+  ; rcv_closed : bool ref
   }
 
 type server_state =
@@ -24,7 +26,7 @@ type server_ctl =
   ; mutable sc_state : server_state
   }
 
-type ('req, 'resp, 'kind) server =
+type (-'req, +'resp, 'kind) server =
   { shandler : ('resp, 'req, 'kind) conn -> unit Lwt.t
   ; sctl : server_ctl
   }
@@ -35,42 +37,39 @@ let ack wak = wakeup wak ()
 
 let nack wak exn = wakeup_exn wak exn
 
-let send_link l s =
-  match l.lmq with
-  | Acks mq ->
-      let (wai, wak) = wait () (* to think: cancellation *) in
-      lwt () = Lwt_mq.put mq (s, wak) in
-      wai
-  | No_acks mq ->
-      Lwt_mq.put mq s
-
 let send conn s =
-  send_link conn.snd s
+  match conn.snd_sink with
+  | Si_Acks si ->
+      let (wai, wak) = wait () (* to think: cancellation *) in
+      lwt () = M.sink_put si (s, wak) in
+      wai
+  | Si_No_acks si ->
+      M.sink_put si s
 
 let recv_ack conn =
-  match conn.rcv.lmq with
-  | Acks mq -> begin
+  match conn.rcv_source with
+  | So_Acks so -> begin
       try_lwt
-        Lwt_mq.take mq
+        M.source_take so
       with
         Lwt_mq.Closed e -> fail e
     end
-  | No_acks _ -> fail @@ Invalid_argument
+  | So_No_acks _ -> fail @@ Invalid_argument
       "Lwt_comm.recv_ack: connection doesn't need ACKs"
 
 let recv conn =
-  match conn.rcv.lmq with
-  | Acks mq -> begin
+  match conn.rcv_source with
+  | So_Acks so -> begin
       try_lwt
-        lwt (r, cnf) = Lwt_mq.take mq in
+        lwt (r, cnf) = M.source_take so in
         ack cnf;
         return r
       with
         Lwt_mq.Closed e -> fail e
     end
-  | No_acks mq -> begin
+  | So_No_acks so -> begin
       try_lwt
-        Lwt_mq.take mq
+        M.source_take so
       with
         Lwt_mq.Closed e -> fail e
     end
@@ -96,15 +95,31 @@ let recv_res conn =
   with
     e -> return @@ `Error e
 
-let shutdown_link exn l =
-  if l.lclosed
+let shutdown_sd exn l =
+  if !(l.snd_closed)
   then ()
   else begin
-    l.lclosed <- true;
+    l.snd_closed := true;
     (* try *)
-      match l.lmq with
-      | Acks mq -> Lwt_mq.close mq exn
-      | No_acks mq -> Lwt_mq.close mq exn
+      match l.snd_sink with
+      | Si_Acks si -> M.close_sink si exn
+      | Si_No_acks si -> M.close_sink si exn
+    (*
+    with e ->
+      Printf.eprintf "close err: %s\n%!" (Printexc.to_string e);
+      raise e
+    *)
+  end
+
+let shutdown_rc exn l =
+  if !(l.rcv_closed)
+  then ()
+  else begin
+    l.rcv_closed := true;
+    (* try *)
+      match l.rcv_source with
+      | So_Acks so -> M.close_source so exn
+      | So_No_acks so -> M.close_source so exn
     (*
     with e ->
       Printf.eprintf "close err: %s\n%!" (Printexc.to_string e);
@@ -115,12 +130,12 @@ let shutdown_link exn l =
 let shutdown ?(exn = End_of_file) conn cmd =
   match cmd with
   | Unix.SHUTDOWN_SEND ->
-      shutdown_link exn conn.snd
+      shutdown_sd exn conn
   | Unix.SHUTDOWN_RECEIVE ->
-      shutdown_link exn conn.rcv
+      shutdown_rc exn conn
   | Unix.SHUTDOWN_ALL ->
-      shutdown_link exn conn.snd;
-      shutdown_link exn conn.rcv
+      shutdown_sd exn conn;
+      shutdown_rc exn conn
 
 let close ?(exn = End_of_file) conn =
   shutdown ~exn conn Unix.SHUTDOWN_ALL
@@ -149,11 +164,6 @@ let shutdown_server ?(exn = Server_shut_down) sctl =
 let wait_for_server_shutdown sctl =
   sctl.sc_shtd_waiter
 
-let link acks =
-  { lmq = if acks then Acks (Lwt_mq.create ()) else No_acks (Lwt_mq.create ());
-    lclosed = false
-  }
-
 let run_lwt_server server server_conn =
   try_lwt
     lwt () = server.shandler server_conn in
@@ -163,11 +173,36 @@ let run_lwt_server server server_conn =
     close server_conn ~exn;
     return_unit
 
+let si_so_pair () =
+  M.sink_source @@ M.of_mq @@ Lwt_mq.create ()
+
+let si_so_link acks =
+  if acks
+  then
+    let (si, so) = si_so_pair () in
+    (Si_Acks si, So_Acks so)
+  else
+    let (si, so) = si_so_pair () in
+    (Si_No_acks si, So_No_acks so)
+
 let conn_pair ~ack_req ~ack_resp =
-  let req_link = link ack_req
-  and resp_link = link ack_resp in
-  let server_conn = { snd = resp_link; rcv = req_link }
-  and client_conn = { snd = req_link; rcv = resp_link } in
+  let (s2c_sink, s2c_source) = si_so_link ack_resp
+  and (c2s_sink, c2s_source) = si_so_link ack_req in
+  let s2c_closed = ref false
+  and c2s_closed = ref false in
+  let server_conn =
+    { snd_sink = s2c_sink
+    ; snd_closed = s2c_closed
+    ; rcv_source = c2s_source
+    ; rcv_closed = c2s_closed
+    }
+  and client_conn =
+    { snd_sink = c2s_sink
+    ; snd_closed = c2s_closed
+    ; rcv_source = s2c_source
+    ; rcv_closed = s2c_closed
+    }
+  in
   (server_conn, client_conn)
 
 let connect
@@ -190,7 +225,7 @@ let with_connection server func =
     close client_conn;
     return_unit
 
-type ('req, 'resp, 'k) unix_func =
+type (+'req, -'resp, 'k) unix_func =
   ('req, 'resp, 'k) conn -> Lwt_unix.file_descr -> unit Lwt.t
 
 let run_unix_func func conn fd =

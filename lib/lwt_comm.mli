@@ -9,7 +9,7 @@
     support other kinds of servers: servers with strict request-response
     style of work, servers that don't require connection (stateless).
  *)
-type ('req, 'resp, 'kind) server
+type (-'req, +'resp, 'kind) server
 
 (** Type of value used to control server: for now, it's possible to shutdown
     server and to wait for server shutdown using value of this type.
@@ -24,10 +24,10 @@ type server_ctl
     Values of type ['snd] are sent to connection, values of type ['rcv] are
     received.
  *)
-type ('snd, 'rcv, 'kind) conn
+type (-'snd, +'rcv, 'kind) conn
 
 (** *)
-type 'snd confirmation
+type -'snd confirmation
 
 val send : ('snd, 'rcv, 'kind) conn -> 'snd -> unit Lwt.t
 
@@ -98,7 +98,7 @@ val wait_for_server_shutdown : server_ctl -> unit Lwt.t
     This function takes [conn] and file descriptor, and passes messages back
     and forth.  When function exits, both connections are closed.
  *)
-type ('req, 'resp, 'k) unix_func =
+type (+'req, -'resp, 'k) unix_func =
   ('req, 'resp, 'k) conn -> Lwt_unix.file_descr -> unit Lwt.t
 
 (** Runs server that listens on given address, on incoming network connection
