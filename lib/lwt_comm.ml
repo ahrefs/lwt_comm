@@ -1,7 +1,11 @@
 open Lwt
 
+type 'a mq =
+| Acks of ('a * unit Lwt.u) Lwt_mq.t
+| No_acks of 'a Lwt_mq.t
+
 type 'a link =
-  { lmq : 'a Lwt_mq.t
+  { lmq : 'a mq
   ; mutable lclosed : bool
   }
 
@@ -25,20 +29,51 @@ type ('req, 'resp, 'kind) server =
   ; sctl : server_ctl
   }
 
+type 'snd confirmation = unit Lwt.u
+
+let ack wak = wakeup wak ()
+
+let nack wak exn = wakeup_exn wak exn
+
 let send_link l s =
-  Lwt_mq.put l.lmq s
+  match l.lmq with
+  | Acks mq ->
+      let (wai, wak) = wait () (* to think: cancellation *) in
+      lwt () = Lwt_mq.put mq (s, wak) in
+      wai
+  | No_acks mq ->
+      Lwt_mq.put mq s
 
 let send conn s =
   send_link conn.snd s
 
-let recv_link l =
-  try_lwt
-    Lwt_mq.take l.lmq
-  with
-    Lwt_mq.Closed e -> fail e
+let recv_ack conn =
+  match conn.rcv.lmq with
+  | Acks mq -> begin
+      try_lwt
+        Lwt_mq.take mq
+      with
+        Lwt_mq.Closed e -> fail e
+    end
+  | No_acks _ -> fail @@ Invalid_argument
+      "Lwt_comm.recv_ack: connection doesn't need ACKs"
 
 let recv conn =
-  recv_link conn.rcv
+  match conn.rcv.lmq with
+  | Acks mq -> begin
+      try_lwt
+        lwt (r, cnf) = Lwt_mq.take mq in
+        ack cnf;
+        return r
+      with
+        Lwt_mq.Closed e -> fail e
+    end
+  | No_acks mq -> begin
+      try_lwt
+        Lwt_mq.take mq
+      with
+        Lwt_mq.Closed e -> fail e
+    end
 
 let recv_opt conn =
   try
@@ -46,6 +81,13 @@ let recv_opt conn =
     return @@ Some r
   with
     End_of_file -> return_none
+
+let recv_res_ack conn =
+  try_lwt
+    lwt r = recv_ack conn in
+    return @@ `Ok r
+  with
+    e -> return @@ `Error e
 
 let recv_res conn =
   try_lwt
@@ -60,7 +102,9 @@ let shutdown_link exn l =
   else begin
     l.lclosed <- true;
     (* try *)
-      Lwt_mq.close l.lmq exn
+      match l.lmq with
+      | Acks mq -> Lwt_mq.close mq exn
+      | No_acks mq -> Lwt_mq.close mq exn
     (*
     with e ->
       Printf.eprintf "close err: %s\n%!" (Printexc.to_string e);
@@ -105,8 +149,10 @@ let shutdown_server ?(exn = Server_shut_down) sctl =
 let wait_for_server_shutdown sctl =
   sctl.sc_shtd_waiter
 
-let link () =
-  { lmq = Lwt_mq.create (); lclosed = false }
+let link acks =
+  { lmq = if acks then Acks (Lwt_mq.create ()) else No_acks (Lwt_mq.create ());
+    lclosed = false
+  }
 
 let run_lwt_server server server_conn =
   try_lwt
@@ -118,13 +164,14 @@ let run_lwt_server server server_conn =
     return_unit
 
 let connect
- : ('req, 'resp, [> `Connect] as 'k) server ->
+ : ?ack_req:bool -> ?ack_resp:bool ->
+   ('req, 'resp, [> `Connect] as 'k) server ->
    ('req, 'resp, 'k) conn
- = fun server ->
+ = fun ?(ack_req = true) ?(ack_resp = true) server ->
   match server.sctl.sc_state with
   | Ss_running ->
-      let req_link = link ()
-      and resp_link = link () in
+      let req_link = link ack_req
+      and resp_link = link ack_resp in
       let server_conn = { snd = resp_link; rcv = req_link }
       and client_conn = { snd = req_link; rcv = resp_link } in
       Lwt.ignore_result (run_lwt_server server server_conn);
@@ -169,7 +216,7 @@ let run_unix_server
         List.fold_left
           (fun stop_now -> function
            | `Accepted fd ->
-               let conn = connect server in
+               let conn = connect ~ack_resp:true ~ack_req:false server in
                ignore_result begin
                  (* Printf.eprintf "run unix server: 0\n%!"; *)
                  lwt () = func conn fd in
@@ -235,7 +282,7 @@ let unix_func_of_maps
         in
         return @@ `From_inch req_opt
       and make_conn_reader () =
-        lwt resp_res = recv_res conn in
+        lwt resp_res = recv_res_ack conn in
         return @@ `From_conn resp_res
       in
       let rec loop ths =
@@ -251,9 +298,24 @@ let unix_func_of_maps
               | `From_inch (Some req) ->
                   lwt () = send conn req in
                   return @@ make_inch_reader () :: ths
-              | `From_conn (`Ok resp) ->
-                  lwt () = resp_to_outch outch resp in
-                  return @@ make_conn_reader () :: ths
+              | `From_conn (`Ok (resp, cfm)) ->
+                  lwt send_res =
+                    try_lwt
+                      lwt () = resp_to_outch outch resp in
+                      return_none
+                    with
+                      e -> return @@ Some e
+                  in
+                  begin match send_res with
+                  | None ->
+                      ack cfm;
+                      return @@ make_conn_reader () :: ths
+                  | Some exn ->
+                      nack cfm exn;
+                      lwt () = Lwt_io.abort inch in
+                      close conn ~exn;
+                      return_nil
+                  end
               | `From_inch None ->
                   shutdown conn Unix.SHUTDOWN_SEND;
                   return ths

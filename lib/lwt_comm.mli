@@ -26,15 +26,29 @@ type server_ctl
  *)
 type ('snd, 'rcv, 'kind) conn
 
+(** *)
+type 'snd confirmation
+
 val send : ('snd, 'rcv, 'kind) conn -> 'snd -> unit Lwt.t
 
 val recv : ('snd, 'rcv, 'kind) conn -> 'rcv Lwt.t
+
+val recv_ack : ('snd, 'rcv, 'kind) conn -> ('rcv * 'rcv confirmation) Lwt.t
+
+val ack : 'rcv confirmation -> unit
+
+val nack : 'rcv confirmation -> exn -> unit
 
 (** Same as [recv], but maps error [End_of_file] to [None], and wraps received
     values in [Some]. *)
 val recv_opt : ('snd, 'rcv, 'kind) conn -> 'rcv option Lwt.t
 
-val recv_res : ('snd, 'rcv, 'kind) conn -> [ `Ok of 'rcv | `Error of exn] Lwt.t
+val recv_res :
+  ('snd, 'rcv, 'kind) conn -> [ `Ok of 'rcv | `Error of exn ] Lwt.t
+
+val recv_res_ack :
+  ('snd, 'rcv, 'kind) conn ->
+  [ `Ok of ('rcv * 'rcv confirmation) | `Error of exn ] Lwt.t
 
 val shutdown :
   ?exn:exn ->
@@ -57,6 +71,7 @@ val duplex :
   (('req, 'resp, 'k) server * server_ctl)
 
 val connect :
+  ?ack_req:bool -> ?ack_resp:bool ->
   ('req, 'resp, [> `Connect] as 'k) server ->
   ('req, 'resp, 'k) conn
 
