@@ -84,10 +84,22 @@ val with_connection :
 exception Server_shut_down
 
 (** Shutdown server: future [connect]s will raise [?exn] (default exception is
-    [Server_shut_down].
-    Server's on_shutdown is executed when server is shut down.
+    [Server_shut_down], and current connections are closed with same exception.
+    It's expected that server and client know how to handle given exception
+    when they receive it while reading from connections.
  *)
 val shutdown_server : ?exn:exn -> server_ctl -> unit Lwt.t
+
+(** Make future [connect]s to server fail with [?exn], and wait for current
+    connection handler instances to exit.
+    [?timeout] is the number of seconds to wait.  Values less or equal to [0.]
+    mean "wait forever".  Default is "wait forever".
+    When [`Instances_exist n] is returned, [n] is the number of running
+    instances.
+ *)
+val shutdown_server_wait :
+  ?exn:exn -> ?timeout:float -> server_ctl ->
+  [ `Instances_exist of int | `Shut_down ] Lwt.t
 
 (** Wait for server's shutdown without trying to shut down server.
     When [wait_for_server_shutdown] returns, server's on_shutdown is already

@@ -24,3 +24,9 @@ Executable linenum_client
   MainIs: linenum_client.ml
   BuildDepends: lwt_comm
   Install: false
+  
+Executable test_shutdown
+  Path: tests
+  MainIs: test_shutdown.ml
+  BuildDepends: lwt_comm
+  Install: false

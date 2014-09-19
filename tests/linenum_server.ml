@@ -1,17 +1,6 @@
 open Lwt
 open Linenum_common
-
-let (linenum_server, _server_ctl) = C.duplex begin fun conn ->
-  let rec loop n =
-    match_lwt C.recv_opt conn with
-    | None -> C.close conn; return_unit
-    | Some line ->
-        let out = string_of_int n ^ ": " ^ line in
-        lwt () = C.send conn out in
-        loop (n + 1)
-  in
-    loop 1
-end
+open Linenum_server_def
 
 let ch_of_fd fd =
   (Lwt_io.of_fd ~mode:Lwt_io.input fd, Lwt_io.of_fd ~mode:Lwt_io.output fd)
