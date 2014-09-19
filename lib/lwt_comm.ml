@@ -140,10 +140,16 @@ let shutdown ?(exn = End_of_file) conn cmd =
 let close ?(exn = End_of_file) conn =
   shutdown ~exn conn Unix.SHUTDOWN_ALL
 
-let duplex serverfunc =
+let on_shutdown_do_nothing () = return_unit
+
+let duplex ?(on_shutdown = on_shutdown_do_nothing) serverfunc =
   let sctl =
     let (wt, wk) = Lwt.wait () in
-    { sc_shtd_waiter = wt
+    { sc_shtd_waiter = begin
+        lwt () = wt in
+        lwt () = on_shutdown () in
+        return_unit
+      end
     ; sc_shtd = lazy (Lwt.wakeup wk ())
     ; sc_state = Ss_running
     }

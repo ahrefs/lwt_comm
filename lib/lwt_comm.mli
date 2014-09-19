@@ -67,6 +67,7 @@ val close : ?exn:exn -> ('snd, 'rcv, 'kind) conn -> unit
     if it was not closed before.
  *)
 val duplex :
+  ?on_shutdown:(unit -> unit Lwt.t) ->
   (('resp, 'req, [`Bidi | `Connect] as 'k) conn -> unit Lwt.t) ->
   (('req, 'resp, 'k) server * server_ctl)
 
