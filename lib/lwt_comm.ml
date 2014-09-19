@@ -205,6 +205,30 @@ let conn_pair ~ack_req ~ack_resp =
   in
   (server_conn, client_conn)
 
+let map_sink m s =
+  match s with
+  | Si_No_acks si -> Si_No_acks (M.map_sink m si)
+  | Si_Acks si -> Si_Acks (M.map_sink (fun (msg, cfm) -> (m msg, cfm)) si)
+
+let map_source m s =
+  match s with
+  | So_No_acks so -> So_No_acks (M.map_source m so)
+  | So_Acks so -> So_Acks (M.map_source (fun (msg, cfm) -> (m msg, cfm)) so)
+
+let map_conn map_req map_resp conn =
+  { snd_sink = map_sink map_req conn.snd_sink
+  ; rcv_source = map_source map_resp conn.rcv_source
+  ; snd_closed = conn.snd_closed
+  ; rcv_closed = conn.rcv_closed
+  }
+
+let map_server map_req map_resp { shandler; sctl } =
+  { sctl = sctl
+  ; shandler = fun conn ->
+      let conn' = map_conn map_resp map_req conn in
+      shandler conn'
+  }
+
 let connect
  : ?ack_req:bool -> ?ack_resp:bool ->
    ('req, 'resp, [> `Connect] as 'k) server ->

@@ -94,6 +94,20 @@ val shutdown_server : ?exn:exn -> server_ctl -> unit Lwt.t
  *)
 val wait_for_server_shutdown : server_ctl -> unit Lwt.t
 
+(** Create server that has requests/responses mapped by given functions. *)
+val map_server :
+  ('req2 -> 'req1) ->
+  ('resp1 -> 'resp2) ->
+  ('req1, 'resp1, 'k) server ->
+  ('req2, 'resp2, 'k) server
+
+(** Create connection that has requests/responses mapped by given functions. *)
+val map_conn :
+  ('req2 -> 'req1) ->
+  ('resp1 -> 'resp2) ->
+  ('req1, 'resp1, 'k) conn ->
+  ('req2, 'resp2, 'k) conn
+
 (** Type of layer between [server] and tcp/ip socket.
     This function takes [conn] and file descriptor, and passes messages back
     and forth.  When function exits, both connections are closed.
