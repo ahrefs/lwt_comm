@@ -384,15 +384,15 @@ let run_unix_server
  ?(listen = 5)
  (func : ('req, 'resp, 'k) unix_func)
  =
+  let sock = Lwt_unix.socket sock_domain sock_type proto in
+  Lwt_unix.setsockopt sock Unix.SO_REUSEADDR true;
+  Lwt_unix.bind sock sock_addr;
+  Lwt_unix.listen sock listen;
+  let shutdown_waiter =
+    lwt () = server.sctl.sc_shtd_waiter in
+    return `Shutdown
+  in
   ignore_result begin try_lwt begin
-    let sock = Lwt_unix.socket sock_domain sock_type proto in
-    Lwt_unix.setsockopt sock Unix.SO_REUSEADDR true;
-    Lwt_unix.bind sock sock_addr;
-    Lwt_unix.listen sock listen;
-    let shutdown_waiter =
-      lwt () = server.sctl.sc_shtd_waiter in
-      return `Shutdown
-    in
     let rec loop () =
       lwt ready = nchoose
         [ begin
@@ -418,13 +418,14 @@ let run_unix_server
         then return_unit
         else loop ()
     in
-      lwt () = loop () in
-      Lwt_unix.close sock
+      loop ()
   end
   with e ->
     Printf.eprintf "run unix server exn: %s\n%!"
       (Printexc.to_string e);
     return_unit
+  finally
+    Lwt_unix.close sock
 end
 
 let ch_of_fd fd =
