@@ -101,6 +101,9 @@ val shutdown_server_wait :
   ?exn:exn -> ?timeout:float -> server_ctl ->
   [ `Instances_exist of int | `Shut_down ] Lwt.t
 
+(** Same as [shutdown_server_wait], but waits infinite time and returns unit. *)
+val shutdown_server_wait_infinite : ?exn:exn -> server_ctl -> unit Lwt.t
+
 (** Wait for server's shutdown without trying to shut down server.
     When [wait_for_server_shutdown] returns, server's on_shutdown is already
     executed.

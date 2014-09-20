@@ -249,6 +249,11 @@ let shutdown_server ?(exn = Server_shut_down) sctl =
   | `Instances_exist _ -> assert false  (* timeout is infinite *)
   | `Shut_down -> return_unit
 
+let shutdown_server_wait_infinite ?(exn = Server_shut_down) sctl =
+  match_lwt shutdown_server_wait ~timeout:0. ~exn sctl with
+  | `Instances_exist _n -> assert false
+  | `Shut_down -> return_unit
+
 let wait_for_server_shutdown sctl =
   sctl.sc_shtd_waiter
 
