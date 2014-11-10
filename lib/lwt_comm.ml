@@ -91,11 +91,16 @@ let recv_opt conn =
     End_of_file -> return_none
 
 let recv_res_ack conn =
-  try_lwt
-    lwt r = recv_ack conn in
-    return @@ `Ok r
-  with
-    e -> return @@ `Error e
+  match conn.rcv_source with
+  | So_Acks so -> begin
+      try_lwt
+        lwt r = M.source_take so in
+        return (`Ok r)
+      with
+        Lwt_mq.Closed e -> return (`Error e)
+    end
+  | So_No_acks _ -> fail @@ Invalid_argument
+      "Lwt_comm.recv_res_ack: connection doesn't need ACKs"
 
 let recv_res conn =
   try_lwt

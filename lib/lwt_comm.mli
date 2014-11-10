@@ -15,7 +15,7 @@ type (-'req, +'resp, 'kind) server
     server and to wait for server shutdown using value of this type.
     This functionality is separated from values of type [server], since there
     may exist code that should be able to only connect to server, but not to
-    shutdown it, and this privileges can be separated by hiding [server_ctl]
+    shutdown it, and these privileges can be separated by hiding [server_ctl]
     value from code that shouldn't be able to control server.
  *)
 type server_ctl
