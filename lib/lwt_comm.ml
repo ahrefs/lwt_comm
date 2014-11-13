@@ -141,8 +141,8 @@ let shutdown_rc exn l =
     begin
     (* try *)
       match l.rcv_source with
-      | So_Acks so -> M.close_source so exn
-      | So_No_acks so -> M.close_source so exn
+      | So_Acks so -> M.close_source so exn ~on_recv:true
+      | So_No_acks so -> M.close_source so exn ~on_recv:true
     (*
     with e ->
       Printf.eprintf "close err: %s\n%!" (Printexc.to_string e);
