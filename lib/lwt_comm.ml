@@ -1,12 +1,14 @@
 open Lwt
 module M = Lwt_mq_map
 
+type 'snd confirmation = unit Lwt.u
+
 type -'a mq_sink =
-| Si_Acks of ('a * unit Lwt.u) M.sink
+| Si_Acks of ('a * unit Lwt.u) M.sink * 'a confirmation ref
 | Si_No_acks of 'a M.sink
 
 type +'a mq_source =
-| So_Acks of ('a * unit Lwt.u) M.source
+| So_Acks of ('a * unit Lwt.u) M.source * 'a confirmation ref
 | So_No_acks of 'a M.source
 
 type (-'snd, +'rcv, 'kind) conn =
@@ -40,24 +42,29 @@ type (-'req, +'resp, 'kind) server =
   ; sctl : server_ctl
   }
 
-type 'snd confirmation = unit Lwt.u
-
 let ack wak = wakeup wak ()
 
 let nack wak exn = wakeup_exn wak exn
 
+let dummy_cfm : 'a confirmation =
+  let (_wai, wak) = wait () in
+  wak
+
 let send conn s =
   match conn.snd_sink with
-  | Si_Acks si ->
+  | Si_Acks (si, last_cfm) ->
       let (wai, wak) = wait () (* to think: cancellation *) in
+      last_cfm := wak;
       lwt () = M.sink_put si (s, wak) in
-      wai
+      lwt () = wai in
+      last_cfm := dummy_cfm;
+      return_unit
   | Si_No_acks si ->
       M.sink_put si s
 
 let recv_ack conn =
   match conn.rcv_source with
-  | So_Acks so -> begin
+  | So_Acks (so, _last_cfm) -> begin
       try_lwt
         M.source_take so
       with
@@ -68,7 +75,7 @@ let recv_ack conn =
 
 let recv conn =
   match conn.rcv_source with
-  | So_Acks so -> begin
+  | So_Acks (so, _last_cfm) -> begin
       try_lwt
         lwt (r, cnf) = M.source_take so in
         ack cnf;
@@ -92,7 +99,7 @@ let recv_opt conn =
 
 let recv_res_ack conn =
   match conn.rcv_source with
-  | So_Acks so -> begin
+  | So_Acks (so, _last_cfm) -> begin
       try_lwt
         lwt r = M.source_take so in
         return (`Ok r)
@@ -114,6 +121,20 @@ let run_on_close conn =
   then Lazy.force conn.on_close
   else ()
 
+let fail_last_cfm cfm_ref exn =
+  let cfm = !cfm_ref in
+  if cfm == dummy_cfm
+  then
+    ()
+  else
+    let wai = waiter_of_wakener cfm in
+    if is_sleeping wai
+    then begin
+      wakeup_later_exn cfm exn;
+      cfm_ref := dummy_cfm
+    end else
+      ()
+
 let shutdown_sd exn l =
   if !(l.snd_closed)
   then ()
@@ -122,7 +143,9 @@ let shutdown_sd exn l =
     begin
     (* try *)
       match l.snd_sink with
-      | Si_Acks si -> M.close_sink si exn
+      | Si_Acks (si, last_cfm) ->
+          fail_last_cfm last_cfm exn;
+          M.close_sink si exn
       | Si_No_acks si -> M.close_sink si exn
     (*
     with e ->
@@ -141,7 +164,9 @@ let shutdown_rc exn l =
     begin
     (* try *)
       match l.rcv_source with
-      | So_Acks so -> M.close_source so exn ~on_recv:true
+      | So_Acks (so, last_cfm) ->
+          fail_last_cfm last_cfm exn;
+          M.close_source so exn ~on_recv:true
       | So_No_acks so -> M.close_source so exn ~on_recv:true
     (*
     with e ->
@@ -288,7 +313,8 @@ let si_so_link acks =
   if acks
   then
     let (si, so) = si_so_pair () in
-    (Si_Acks si, So_Acks so)
+    let last_cfm_ref = ref dummy_cfm in
+    (Si_Acks (si, last_cfm_ref), So_Acks (so, last_cfm_ref))
   else
     let (si, so) = si_so_pair () in
     (Si_No_acks si, So_No_acks so)
@@ -318,12 +344,14 @@ let conn_pair ~ack_req ~ack_resp on_close =
 let map_sink m s =
   match s with
   | Si_No_acks si -> Si_No_acks (M.map_sink m si)
-  | Si_Acks si -> Si_Acks (M.map_sink (fun (msg, cfm) -> (m msg, cfm)) si)
+  | Si_Acks (si, last_cfm) ->
+      Si_Acks (M.map_sink (fun (msg, cfm) -> (m msg, cfm)) si, last_cfm)
 
 let map_source m s =
   match s with
   | So_No_acks so -> So_No_acks (M.map_source m so)
-  | So_Acks so -> So_Acks (M.map_source (fun (msg, cfm) -> (m msg, cfm)) so)
+  | So_Acks (so, last_cfm) ->
+      So_Acks (M.map_source (fun (msg, cfm) -> (m msg, cfm)) so, last_cfm)
 
 let map_conn map_req map_resp conn =
   { snd_sink = map_sink map_req conn.snd_sink

@@ -30,3 +30,9 @@ Executable test_shutdown
   MainIs: test_shutdown.ml
   BuildDepends: lwt_comm
   Install: false
+
+Executable fail_before_ack
+  Path: tests
+  MainIs: fail_before_ack.ml
+  BuildDepends: lwt_comm
+  Install: false
