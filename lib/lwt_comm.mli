@@ -26,18 +26,49 @@ type server_ctl
  *)
 type (-'snd, +'rcv, 'kind) conn
 
-(** *)
-type -'snd confirmation
+(** ACKs.
 
+    Connection part (sending or receiving) can behave as
+    - message queue in memory, sender puts values, receiver takes them.
+      No ACKs or other flow control.
+    - single memory cell that requires receiver to confirm processing of
+      message.  This is needed in cases when message processing can fail due
+      to real world issues, for example, when server sends/receives data from
+      socket.  Here the error must be raised as soon as possible: [send] call
+      must fail.  We say that such connection "uses ACKs".
+
+    [connect]'s [?ack_req] and [?ack_resp] arguments determine whether sending
+    and receiving parts of connection to server will use ACKs.
+
+    When client/server have processed message received using [recv],
+    [ack] function may be called on this connection.  For ACK-enabled
+    connection [ack]:
+    - tells sender "the message was processed ok, now wake up and continue your
+      tasks"
+    - tells other senders (that are blocked waiting for their chance to send
+      request to server) "now the first of you can wake up and send message"
+
+    When there is an error processing message, connection must be closed using
+    [close ~exn:..].  In this case all senders wake up with given exception.
+
+    For ACK-connections [recv] automatically ACKs previous message, so calls
+    to [ack] can be omited in most cases.
+ *)
+
+(** Send message to connection.
+    Raises exception when connection is closed.
+ *)
 val send : ('snd, 'rcv, 'kind) conn -> 'snd -> unit Lwt.t
 
+(** Receive message from connection.
+    Raises exception when connection is closed.
+ *)
 val recv : ('snd, 'rcv, 'kind) conn -> 'rcv Lwt.t
 
-val recv_ack : ('snd, 'rcv, 'kind) conn -> ('rcv * 'rcv confirmation) Lwt.t
-
-val ack : 'rcv confirmation -> unit
-
-val nack : 'rcv confirmation -> exn -> unit
+(** Mark last message from this connection as received and processed.
+    No-op for connections which receiving part doesn't use ACKs.
+ *)
+val ack : ('snd, 'rcv, 'kind) conn -> unit
 
 (** Same as [recv], but maps error [End_of_file] to [None], and wraps received
     values in [Some]. *)
@@ -45,10 +76,6 @@ val recv_opt : ('snd, 'rcv, 'kind) conn -> 'rcv option Lwt.t
 
 val recv_res :
   ('snd, 'rcv, 'kind) conn -> [ `Ok of 'rcv | `Error of exn ] Lwt.t
-
-val recv_res_ack :
-  ('snd, 'rcv, 'kind) conn ->
-  [ `Ok of ('rcv * 'rcv confirmation) | `Error of exn ] Lwt.t
 
 val shutdown :
   ?exn:exn ->

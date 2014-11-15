@@ -1,21 +1,26 @@
 open Lwt
 module M = Lwt_mq_map
+module Cond = Lwt_condition
 
-type 'snd confirmation = unit Lwt.u
+type cfm =
+  | Ack
+  | Nack of exn
 
 type -'a mq_sink =
-| Si_Acks of ('a * unit Lwt.u) M.sink * 'a confirmation ref
-| Si_No_acks of 'a M.sink
+  { si : 'a M.sink
+  ; si_cfm : cfm Cond.t option
+  ; si_closed : bool ref
+  }
 
 type +'a mq_source =
-| So_Acks of ('a * unit Lwt.u) M.source * 'a confirmation ref
-| So_No_acks of 'a M.source
+  { so : 'a M.source
+  ; so_cfm : cfm Cond.t option
+  ; so_closed : bool ref
+  }
 
 type (-'snd, +'rcv, 'kind) conn =
   { snd_sink : 'snd mq_sink
-  ; snd_closed : bool ref
   ; rcv_source : 'rcv mq_source
-  ; rcv_closed : bool ref
   ; on_close : unit Lazy.t
       (* value is forced when connection is closed for sendind and for
          receiving.  When forced, it removes connection from server_ctl.conns.
@@ -42,53 +47,32 @@ type (-'req, +'resp, 'kind) server =
   ; sctl : server_ctl
   }
 
-let ack wak = wakeup wak ()
-
-let nack wak exn = wakeup_exn wak exn
-
-let dummy_cfm : 'a confirmation =
-  let (_wai, wak) = wait () in
-  wak
+let ack conn =
+  match conn.rcv_source.so_cfm with
+  | None -> ()
+  | Some c -> Cond.signal c Ack
 
 let send conn s =
-  match conn.snd_sink with
-  | Si_Acks (si, last_cfm) ->
-      let (wai, wak) = wait () (* to think: cancellation *) in
-      last_cfm := wak;
-      lwt () = M.sink_put si (s, wak) in
-      lwt () = wai in
-      last_cfm := dummy_cfm;
-      return_unit
-  | Si_No_acks si ->
-      M.sink_put si s
-
-let recv_ack conn =
-  match conn.rcv_source with
-  | So_Acks (so, _last_cfm) -> begin
-      try_lwt
-        M.source_take so
-      with
-        Lwt_mq.Closed e -> fail e
-    end
-  | So_No_acks _ -> fail @@ Invalid_argument
-      "Lwt_comm.recv_ack: connection doesn't need ACKs"
+  let sink = conn.snd_sink in
+  let cond_wait_opt =
+    match sink.si_cfm with
+    | None -> None
+    | Some c -> Some (Cond.wait c)
+  in
+  lwt () = M.sink_put sink.si s in
+  match cond_wait_opt with
+  | None -> return_unit
+  | Some cond_wait ->
+      match_lwt cond_wait with
+      | Ack -> return_unit
+      | Nack e -> fail e
 
 let recv conn =
-  match conn.rcv_source with
-  | So_Acks (so, _last_cfm) -> begin
-      try_lwt
-        lwt (r, cnf) = M.source_take so in
-        ack cnf;
-        return r
-      with
-        Lwt_mq.Closed e -> fail e
-    end
-  | So_No_acks so -> begin
-      try_lwt
-        M.source_take so
-      with
-        Lwt_mq.Closed e -> fail e
-    end
+  ack conn;
+  try_lwt
+    M.source_take conn.rcv_source.so
+  with
+    Lwt_mq.Closed e -> fail e
 
 let recv_opt conn =
   try
@@ -96,18 +80,6 @@ let recv_opt conn =
     return @@ Some r
   with
     End_of_file -> return_none
-
-let recv_res_ack conn =
-  match conn.rcv_source with
-  | So_Acks (so, _last_cfm) -> begin
-      try_lwt
-        lwt r = M.source_take so in
-        return (`Ok r)
-      with
-        Lwt_mq.Closed e -> return (`Error e)
-    end
-  | So_No_acks _ -> fail @@ Invalid_argument
-      "Lwt_comm.recv_res_ack: connection doesn't need ACKs"
 
 let recv_res conn =
   try_lwt
@@ -117,64 +89,50 @@ let recv_res conn =
     e -> return @@ `Error e
 
 let run_on_close conn =
-  if !(conn.snd_closed) && !(conn.rcv_closed)
+  if !(conn.snd_sink.si_closed) && !(conn.rcv_source.so_closed)
   then Lazy.force conn.on_close
   else ()
 
-let fail_last_cfm cfm_ref exn =
-  let cfm = !cfm_ref in
-  if cfm == dummy_cfm
-  then
-    ()
-  else
-    let wai = waiter_of_wakener cfm in
-    if is_sleeping wai
-    then begin
-      wakeup_later_exn cfm exn;
-      cfm_ref := dummy_cfm
-    end else
-      ()
-
-let shutdown_sd exn l =
-  if !(l.snd_closed)
+let shutdown_sd exn conn =
+  let sink = conn.snd_sink in
+  if !(sink.si_closed)
   then ()
   else begin
-    l.snd_closed := true;
+    sink.si_closed := true;
     begin
     (* try *)
-      match l.snd_sink with
-      | Si_Acks (si, last_cfm) ->
-          fail_last_cfm last_cfm exn;
-          M.close_sink si exn
-      | Si_No_acks si -> M.close_sink si exn
+      M.close_sink sink.si exn
     (*
     with e ->
       Printf.eprintf "close err: %s\n%!" (Printexc.to_string e);
       raise e
     *)
     end;
-    run_on_close l
+    run_on_close conn
   end
 
-let shutdown_rc exn l =
-  if !(l.rcv_closed)
+let shutdown_rc exn conn =
+  let source = conn.rcv_source in
+  if !(source.so_closed)
   then ()
   else begin
-    l.rcv_closed := true;
+    source.so_closed := true;
     begin
     (* try *)
-      match l.rcv_source with
-      | So_Acks (so, last_cfm) ->
-          fail_last_cfm last_cfm exn;
-          M.close_source so exn ~on_recv:true
-      | So_No_acks so -> M.close_source so exn ~on_recv:true
+      (* first, kill sender that waits for ACK (if any) *)
+      begin match source.so_cfm with
+      | None -> ()
+      | Some c -> Cond.signal c (Nack exn)
+      end;
+      (* then kill (on_recv:true) all other senders and close source *)
+      M.close_source source.so exn ~on_recv:true
     (*
     with e ->
       Printf.eprintf "close err: %s\n%!" (Printexc.to_string e);
       raise e
     *)
     end;
-    run_on_close l
+    run_on_close conn
   end
 
 let shutdown ?(exn = End_of_file) conn cmd =
@@ -250,8 +208,8 @@ let shutdown_server_wait ?(exn = Server_shut_down) ?(timeout = 0.) sctl =
     let timeout_waiter = timeout_waiter timeout in
     let rec loop () =
       assert (sctl.instances > 0);
-      Printf.eprintf "shutdown_server_wait loop, %i more instances\n%!"
-        sctl.instances;
+      (* Printf.eprintf "shutdown_server_wait loop, %i more instances\n%!"
+        sctl.instances; *)
       let close_waiter = !close_waiter_ref >|= fun () -> `Conn_closed in
       lwt event = choose [timeout_waiter; close_waiter] in
       let insts = sctl.instances in
@@ -270,9 +228,11 @@ let shutdown_server_wait ?(exn = Server_shut_down) ?(timeout = 0.) sctl =
       loop ()
 
 let shutdown_server ?(exn = Server_shut_down) sctl =
+  (*
   Printf.eprintf
     "shutdown_server: conns: %i instances: %i\n%!"
     (Hashtbl.length sctl.conns) sctl.instances;
+  *)
   Hashtbl.iter (fun _cid closefunc -> closefunc exn) sctl.conns;
   Hashtbl.clear sctl.conns;
   match_lwt shutdown_server_wait ~exn ~timeout:0. sctl with
@@ -306,58 +266,63 @@ let run_lwt_server server server_conn =
     end;
     return_unit
 
-let si_so_pair () =
-  M.sink_source @@ M.of_mq @@ Lwt_mq.create ()
+let si_so_pair ~block_limit =
+  M.sink_source @@ M.of_mq @@ Lwt_mq.create ~block_limit ()
 
 let si_so_link acks =
-  if acks
-  then
-    let (si, so) = si_so_pair () in
-    let last_cfm_ref = ref dummy_cfm in
-    (Si_Acks (si, last_cfm_ref), So_Acks (so, last_cfm_ref))
-  else
-    let (si, so) = si_so_pair () in
-    (Si_No_acks si, So_No_acks so)
+  let block_limit =
+    if acks
+    then 0  (* no values are stored.  every sender waits for [recv]. *)
+    else Lwt_mq.no_limit
+  in
+  let cfm =
+    if acks
+    then Some (Cond.create ())
+    else None
+  in
+  let closed = ref false in
+  let (si, so) = si_so_pair ~block_limit in
+  ( { si = si
+    ; si_closed = closed
+    ; si_cfm = cfm
+    }
+  , { so = so
+    ; so_closed = closed
+    ; so_cfm = cfm
+    }
+  )
 
 let conn_pair ~ack_req ~ack_resp on_close =
   let (s2c_sink, s2c_source) = si_so_link ack_resp
   and (c2s_sink, c2s_source) = si_so_link ack_req in
-  let s2c_closed = ref false
-  and c2s_closed = ref false in
   let server_conn =
     { snd_sink = s2c_sink
-    ; snd_closed = s2c_closed
     ; rcv_source = c2s_source
-    ; rcv_closed = c2s_closed
     ; on_close = on_close
     }
   and client_conn =
     { snd_sink = c2s_sink
-    ; snd_closed = c2s_closed
     ; rcv_source = s2c_source
-    ; rcv_closed = s2c_closed
     ; on_close = on_close
     }
   in
   (server_conn, client_conn)
 
 let map_sink m s =
-  match s with
-  | Si_No_acks si -> Si_No_acks (M.map_sink m si)
-  | Si_Acks (si, last_cfm) ->
-      Si_Acks (M.map_sink (fun (msg, cfm) -> (m msg, cfm)) si, last_cfm)
+  { si = M.map_sink m s.si
+  ; si_cfm = s.si_cfm
+  ; si_closed = s.si_closed
+  }
 
 let map_source m s =
-  match s with
-  | So_No_acks so -> So_No_acks (M.map_source m so)
-  | So_Acks (so, last_cfm) ->
-      So_Acks (M.map_source (fun (msg, cfm) -> (m msg, cfm)) so, last_cfm)
+  { so = M.map_source m s.so
+  ; so_cfm = s.so_cfm
+  ; so_closed = s.so_closed
+  }
 
 let map_conn map_req map_resp conn =
   { snd_sink = map_sink map_req conn.snd_sink
   ; rcv_source = map_source map_resp conn.rcv_source
-  ; snd_closed = conn.snd_closed
-  ; rcv_closed = conn.rcv_closed
   ; on_close = conn.on_close
   }
 
@@ -497,7 +462,7 @@ let unix_func_of_maps
         in
         return @@ `From_inch req_opt
       and make_conn_reader () =
-        lwt resp_res = recv_res_ack conn in
+        lwt resp_res = recv_res conn in
         return @@ `From_conn resp_res
       in
       let rec loop ths =
@@ -513,7 +478,7 @@ let unix_func_of_maps
               | `From_inch (Some req) ->
                   lwt () = send conn req in
                   return @@ make_inch_reader () :: ths
-              | `From_conn (`Ok (resp, cfm)) ->
+              | `From_conn (`Ok resp) ->
                   lwt send_res =
                     try_lwt
                       lwt () = resp_to_outch outch resp in
@@ -523,10 +488,9 @@ let unix_func_of_maps
                   in
                   begin match send_res with
                   | None ->
-                      ack cfm;
+                      ack conn;
                       return @@ make_conn_reader () :: ths
                   | Some exn ->
-                      nack cfm exn;
                       lwt () = Lwt_io.abort inch in
                       close conn ~exn;
                       return_nil

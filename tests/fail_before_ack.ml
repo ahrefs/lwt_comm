@@ -5,7 +5,7 @@ open Lwt
 module C = Lwt_comm
 
 let (server, _ctl) = C.duplex @@ fun conn ->
-  lwt ((), _cfm) = C.recv_ack conn in
+  lwt () = C.recv conn in
   fail @@ Exit
 
 let () = Lwt_main.run begin
