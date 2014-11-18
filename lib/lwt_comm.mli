@@ -40,19 +40,20 @@ type (-'snd, +'rcv, 'kind) conn
     [connect]'s [?ack_req] and [?ack_resp] arguments determine whether sending
     and receiving parts of connection to server will use ACKs.
 
-    When client/server have processed message received using [recv],
-    [ack] function may be called on this connection.  For ACK-enabled
-    connection [ack]:
+    When client/server has processed message received using [recv_no_ack]
+    ([recv_no_ack_opt], [recv_no_ack_res]), [ack] function must be called
+    on this connection.  For ACK-enabled connection, [ack]:
     - tells sender "the message was processed ok, now wake up and continue your
       tasks"
     - tells other senders (that are blocked waiting for their chance to send
-      request to server) "now the first of you can wake up and send message"
+      request to server) "now next sender can wake up and send message"
 
     When there is an error processing message, connection must be closed using
-    [close ~exn:..].  In this case all senders wake up with given exception.
+    [close ~exn:..] (in case of server, if error is an exception, it can be
+    thrown from connection's handler thread, connection will be closed too).
 
-    For ACK-connections [recv] automatically ACKs previous message, so calls
-    to [ack] can be omited in most cases.
+    When connection is closed with exception, all waiting senders wake up with
+    given exception.
  *)
 
 (** Send message to connection.
@@ -60,18 +61,30 @@ type (-'snd, +'rcv, 'kind) conn
  *)
 val send : ('snd, 'rcv, 'kind) conn -> 'snd -> unit Lwt.t
 
-(** Receive message from connection.
+(** Receive message from connection and don't send ACK.
     Raises exception when connection is closed.
+    When message is processed, call [ack conn] on success or close connection
+    on failure.
  *)
-val recv : ('snd, 'rcv, 'kind) conn -> 'rcv Lwt.t
+val recv_no_ack : ('snd, 'rcv, 'kind) conn -> 'rcv Lwt.t
+
+(** Same as [recv_no_ack], but maps error [End_of_file] to [None], and wraps
+    received values in [Some]. *)
+val recv_no_ack_opt : ('snd, 'rcv, 'kind) conn -> 'rcv option Lwt.t
+
+val recv_no_ack_res :
+  ('snd, 'rcv, 'kind) conn -> [ `Ok of 'rcv | `Error of exn ] Lwt.t
 
 (** Mark last message from this connection as received and processed.
     No-op for connections which receiving part doesn't use ACKs.
+    Note: call [ack] only once for every processed message, otherwise it will
+    raise error.
  *)
 val ack : ('snd, 'rcv, 'kind) conn -> unit
 
-(** Same as [recv], but maps error [End_of_file] to [None], and wraps received
-    values in [Some]. *)
+(** = [recv_no_ack] + [ack].  Should be used when ACKs are not needed. *)
+val recv : ('snd, 'rcv, 'kind) conn -> 'rcv Lwt.t
+
 val recv_opt : ('snd, 'rcv, 'kind) conn -> 'rcv option Lwt.t
 
 val recv_res :
@@ -178,6 +191,8 @@ val run_unix_server :
     [?setup_fd] is called before creating Lwt_io channels, used to set up
     socket-specific options.
     Unhandled exceptions are currently dumped to stderr.
+    Argument with type [Lwt_io.input_channel -> 'req Lwt.t] can throw
+    [End_of_file] to indicate normal connection closing.
  *)
 val unix_func_of_maps :
   ?setup_fd : (Lwt_unix.file_descr -> unit Lwt.t) ->

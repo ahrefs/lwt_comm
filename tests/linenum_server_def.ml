@@ -10,7 +10,14 @@ let (linenum_server, server_ctl) = C.duplex begin fun conn ->
         lwt () = C.send conn out in
         loop (n + 1)
   in
-    loop 1
+    try_lwt
+      loop 1
+    with
+    | End_of_file as e -> fail e
+    | e ->
+        Printf.eprintf "linenum_server internal error: %s\n%!"
+          (Printexc.to_string e);
+        fail e
 end
 ~on_shutdown: begin fun () ->
   Printf.eprintf "linenum_server shut down\n%!";

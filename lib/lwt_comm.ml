@@ -2,20 +2,26 @@ open Lwt
 module M = Lwt_mq_map
 module Cond = Lwt_condition
 
-type cfm =
-  | Ack
-  | Nack of exn
+type link_state =
+  | St_ready
+  | St_waiting_ack
+  | St_closed of exn
+
+type ack_sync =
+  | No_acks
+  | Acks of Lwt_mutex.t * Lwt_mutex.t
+      (** outer mutex, ack mutex *)
 
 type -'a mq_sink =
   { si : 'a M.sink
-  ; si_cfm : cfm Cond.t option
-  ; si_closed : bool ref
+  ; si_acks : ack_sync
+  ; si_state : link_state ref
   }
 
 type +'a mq_source =
   { so : 'a M.source
-  ; so_cfm : cfm Cond.t option
-  ; so_closed : bool ref
+  ; so_acks : ack_sync
+  ; so_state : link_state ref
   }
 
 type (-'snd, +'rcv, 'kind) conn =
@@ -48,92 +54,112 @@ type (-'req, +'resp, 'kind) server =
   }
 
 let ack conn =
-  match conn.rcv_source.so_cfm with
-  | None -> ()
-  | Some c -> Cond.signal c Ack
+  let s = conn.rcv_source in
+  let st = s.so_state in
+  match !st, s.so_acks with
+  | St_ready, Acks _ -> invalid_arg "Lwt_comm.ack: already ACKed"
+  | St_waiting_ack, No_acks -> assert false
+  | St_closed _exn, _ -> invalid_arg "Lwt_comm.ack: connection closed"
+  | St_ready, No_acks -> ()
+  | St_waiting_ack, Acks (_o, a) ->
+      st := St_ready;
+      Lwt_mutex.unlock a
 
-let send conn s =
-  let sink = conn.snd_sink in
-  let cond_wait_opt =
-    match sink.si_cfm with
-    | None -> None
-    | Some c -> Some (Cond.wait c)
-  in
-  lwt () = M.sink_put sink.si s in
-  match cond_wait_opt with
-  | None -> return_unit
-  | Some cond_wait ->
-      match_lwt cond_wait with
-      | Ack -> return_unit
-      | Nack e -> fail e
+let send conn msg =
+  let s = conn.snd_sink in
+  let acks = s.si_acks in
+  let st = s.si_state in
+  match acks, !st with
+  | _, St_waiting_ack -> assert false
+  | _, St_closed exn -> fail exn
+  | No_acks, St_ready -> M.sink_put s.si msg
+  | Acks (o, a), St_ready ->
+      Lwt_mutex.with_lock o @@ fun () ->
+        st := St_waiting_ack;
+        assert (not (Lwt_mutex.is_locked a));
+        lwt () = Lwt_mutex.lock a in
+        let put = M.sink_put s.si msg in
+        on_cancel put (fun () -> st := St_ready);
+        lwt () = put in
+        (* waiting; [ack] and [close] unlock it *)
+        Lwt_mutex.with_lock a @@ fun () ->
+        match !st with
+        | St_waiting_ack -> assert false
+        | St_closed exn -> fail exn
+        | St_ready -> return_unit
 
-let recv conn =
-  ack conn;
+let recv_no_ack conn =
+  let s = conn.rcv_source in
   try_lwt
-    M.source_take conn.rcv_source.so
+    M.source_take s.so
   with
     Lwt_mq.Closed e -> fail e
 
-let recv_opt conn =
-  try
-    lwt r = recv conn in
-    return @@ Some r
-  with
-    End_of_file -> return_none
-
-let recv_res conn =
+let recv_no_ack_res conn =
   try_lwt
-    lwt r = recv conn in
+    lwt r = recv_no_ack conn in
     return @@ `Ok r
   with
     e -> return @@ `Error e
 
+let recv_no_ack_opt conn =
+  try
+    lwt r = recv_no_ack conn in
+    return @@ Some r
+  with
+    End_of_file -> return_none
+
+let recv conn =
+  lwt r = recv_no_ack conn in
+  ack conn;
+  return r
+
+let recv_opt conn =
+  lwt r = recv_no_ack_opt conn in
+  ack conn;
+  return r
+
+let recv_res conn =
+  lwt r = recv_no_ack_res conn in
+  ack conn;
+  return r
+
+let is_state_closed st =
+  match !st with
+  | St_closed _ -> true
+  | St_ready | St_waiting_ack -> false
+
 let run_on_close conn =
-  if !(conn.snd_sink.si_closed) && !(conn.rcv_source.so_closed)
+  if    is_state_closed conn.snd_sink.si_state
+     && is_state_closed conn.rcv_source.so_state
   then Lazy.force conn.on_close
   else ()
 
 let shutdown_sd exn conn =
   let sink = conn.snd_sink in
-  if !(sink.si_closed)
-  then ()
-  else begin
-    sink.si_closed := true;
-    begin
-    (* try *)
-      M.close_sink sink.si exn
-    (*
-    with e ->
-      Printf.eprintf "close err: %s\n%!" (Printexc.to_string e);
-      raise e
-    *)
-    end;
-    run_on_close conn
-  end
+  let st = sink.si_state in
+  match !st with
+  | St_closed _ -> ()
+  | St_waiting_ack | St_ready ->
+      st := St_closed exn;
+      M.close_sink sink.si exn;
+      run_on_close conn
 
 let shutdown_rc exn conn =
   let source = conn.rcv_source in
-  if !(source.so_closed)
-  then ()
-  else begin
-    source.so_closed := true;
-    begin
-    (* try *)
-      (* first, kill sender that waits for ACK (if any) *)
-      begin match source.so_cfm with
-      | None -> ()
-      | Some c -> Cond.signal c (Nack exn)
+  let st = source.so_state in
+  match !st with
+  | St_closed _ -> ()
+  | St_waiting_ack | St_ready ->
+      source.so_state := St_closed exn;
+      (* unlock sender that waits for ACK (if any) *)
+      begin match source.so_acks with
+      | No_acks -> ()
+      | Acks (_o, a) -> Lwt_mutex.unlock a
       end;
-      (* then kill (on_recv:true) all other senders and close source *)
-      M.close_source source.so exn ~on_recv:true
-    (*
-    with e ->
-      Printf.eprintf "close err: %s\n%!" (Printexc.to_string e);
-      raise e
-    *)
-    end;
-    run_on_close conn
-  end
+      (* kill (on_recv:true) all other senders and close source *)
+      M.close_source source.so exn ~on_recv:true;
+      run_on_close conn
 
 let shutdown ?(exn = End_of_file) conn cmd =
   match cmd with
@@ -275,20 +301,20 @@ let si_so_link acks =
     then 0  (* no values are stored.  every sender waits for [recv]. *)
     else Lwt_mq.no_limit
   in
-  let cfm =
+  let acks =
     if acks
-    then Some (Cond.create ())
-    else None
+    then Acks (Lwt_mutex.create (), Lwt_mutex.create ())
+    else No_acks
   in
-  let closed = ref false in
+  let closed = ref St_ready in
   let (si, so) = si_so_pair ~block_limit in
   ( { si = si
-    ; si_closed = closed
-    ; si_cfm = cfm
+    ; si_state = closed
+    ; si_acks = acks
     }
   , { so = so
-    ; so_closed = closed
-    ; so_cfm = cfm
+    ; so_state = closed
+    ; so_acks = acks
     }
   )
 
@@ -310,14 +336,14 @@ let conn_pair ~ack_req ~ack_resp on_close =
 
 let map_sink m s =
   { si = M.map_sink m s.si
-  ; si_cfm = s.si_cfm
-  ; si_closed = s.si_closed
+  ; si_acks = s.si_acks
+  ; si_state = s.si_state
   }
 
 let map_source m s =
   { so = M.map_source m s.so
-  ; so_cfm = s.so_cfm
-  ; so_closed = s.so_closed
+  ; so_acks = s.so_acks
+  ; so_state = s.so_state
   }
 
 let map_conn map_req map_resp conn =
@@ -443,7 +469,6 @@ let do_nothing_on_server_close
   =
    return_unit
 
-(* req_of_bytes can throw End_of_file to indicate closing *)
 let unix_func_of_maps
  ?(setup_fd = don't_setup_fd)
  ?(on_server_close = do_nothing_on_server_close)
@@ -462,7 +487,7 @@ let unix_func_of_maps
         in
         return @@ `From_inch req_opt
       and make_conn_reader () =
-        lwt resp_res = recv_res conn in
+        lwt resp_res = recv_no_ack_res conn in
         return @@ `From_conn resp_res
       in
       let rec loop ths =
@@ -476,9 +501,11 @@ let unix_func_of_maps
             Lwt_list.fold_left_s begin
               fun ths -> function
               | `From_inch (Some req) ->
+                  (* Printf.eprintf "unix_func_of_maps: inch/some\n%!"; *)
                   lwt () = send conn req in
                   return @@ make_inch_reader () :: ths
               | `From_conn (`Ok resp) ->
+                  (* Printf.eprintf "unix_func_of_maps: conn/resp\n%!"; *)
                   lwt send_res =
                     try_lwt
                       lwt () = resp_to_outch outch resp in
@@ -496,9 +523,11 @@ let unix_func_of_maps
                       return_nil
                   end
               | `From_inch None ->
+                  (* Printf.eprintf "unix_func_of_maps: inch/none\n%!"; *)
                   shutdown conn Unix.SHUTDOWN_SEND;
                   return ths
               | `From_conn (`Error exn) ->
+                  (* Printf.eprintf "unix_func_of_maps: conn/err\n%!"; *)
                   lwt () = on_server_close inch outch exn in
                   lwt () =
                     if Lwt_unix.state fd = Lwt_unix.Opened
