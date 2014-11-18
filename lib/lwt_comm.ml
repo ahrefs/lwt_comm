@@ -59,7 +59,8 @@ let ack conn =
   match !st, s.so_acks with
   | St_ready, Acks _ -> invalid_arg "Lwt_comm.ack: already ACKed"
   | St_waiting_ack, No_acks -> assert false
-  | St_closed _exn, _ -> invalid_arg "Lwt_comm.ack: connection closed"
+  | St_closed _exn, Acks _ -> invalid_arg "Lwt_comm.ack: connection closed"
+  | St_closed _exn, No_acks -> ()
   | St_ready, No_acks -> ()
   | St_waiting_ack, Acks (_o, a) ->
       st := St_ready;

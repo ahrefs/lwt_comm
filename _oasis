@@ -36,3 +36,9 @@ Executable fail_before_ack
   MainIs: fail_before_ack.ml
   BuildDepends: lwt_comm
   Install: false
+
+Executable misc_tests
+  Path: tests
+  MainIs: misc_tests.ml
+  BuildDepends: lwt_comm
+  Install: false
