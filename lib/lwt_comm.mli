@@ -130,16 +130,25 @@ exception Server_shut_down
  *)
 val shutdown_server : ?exn:exn -> server_ctl -> unit Lwt.t
 
+(** Constructors of ['a wait] are used in [shutdown_server_wait]. *)
+type _ wait =
+  | Time : float -> [ `Instances_exist of int | `Shut_down ] wait
+  | Forever : unit wait
+  | Don't : int wait
+
 (** Make future [connect]s to server fail with [?exn], and wait for current
     connection handler instances to exit.
-    [?timeout] is the number of seconds to wait.  Values less or equal to [0.]
-    mean "wait forever".  Default is "wait forever".
-    When [`Instances_exist n] is returned, [n] is the number of running
-    instances.
- *)
-val shutdown_server_wait :
-  ?exn:exn -> ?timeout:float -> server_ctl ->
-  [ `Instances_exist of int | `Shut_down ] Lwt.t
+    [?wait] can be
+    - [Time s], where [s] is the number of seconds to wait, it must be not
+      negative.  Returned value can be:
+      - [`Instances_exist n] -- [n] instances still connected to server
+      - [ `Shut_down ] -- server has shut down
+    - [Forever] -- wait for server shutdown forever, [()] is returned.
+    - [Don't] -- don't wait for server shutdown.  Returned value is number of
+      instances connected to server now.
+    Default is "wait forever".
+  *)
+val shutdown_server_wait : ?exn:exn -> server_ctl -> 'a wait -> 'a Lwt.t
 
 (** Same as [shutdown_server_wait], but waits infinite time and returns unit. *)
 val shutdown_server_wait_infinite : ?exn:exn -> server_ctl -> unit Lwt.t

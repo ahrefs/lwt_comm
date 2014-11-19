@@ -51,16 +51,15 @@ let io_main2 () =
   let conn = C.connect linenum_server in
   ignore_result (client_loop conn);
   lwt () = Lwt_unix.sleep 0.5 in
-  match_lwt C.shutdown_server_wait server_ctl with
-  | `Shut_down -> eprintf "shut down\n%!"; return_unit
-  | `Instances_exist n -> eprintf "instances exist: %i\n%!" n; return_unit
+  lwt () = C.shutdown_server_wait server_ctl C.Forever in
+  eprintf "shut down\n%!"; return_unit
 
 (* waiting for close with small timeout, then forcing shutdown *)
 let io_main3 () =
   let conn = C.connect linenum_server in
   ignore_result (client_loop conn);
   lwt () = Lwt_unix.sleep 0.3 in
-  match_lwt C.shutdown_server_wait server_ctl ~timeout:0.3 with
+  match_lwt C.shutdown_server_wait server_ctl @@ C.Time 0.3 with
   | `Shut_down -> eprintf "shut down\n%!"; return_unit
   | `Instances_exist n ->
       eprintf "instances exist: %i, forcing shutdown\n%!" n;
@@ -73,15 +72,11 @@ let io_main4 () =
   let conn = C.connect linenum_server in
   ignore_result (client_loop conn);
   lwt () = Lwt_unix.sleep 0.3 in
-  match_lwt C.shutdown_server_wait server_ctl ~timeout:0.3 with
+  match_lwt C.shutdown_server_wait server_ctl @@ C.Time 0.3 with
   | `Shut_down -> eprintf "shut down #1\n%!"; return_unit
   | `Instances_exist n ->
       eprintf "instances exist: %i, waiting more\n%!" n;
-      match_lwt C.shutdown_server_wait server_ctl with
-      | `Shut_down -> eprintf "shut down #2\n%!"; return_unit
-      | `Instances_exist n ->
-          eprintf "instances exist: %i\n%!" n;
-          return_unit
+      C.shutdown_server_wait_infinite server_ctl
 
 let () =
   try

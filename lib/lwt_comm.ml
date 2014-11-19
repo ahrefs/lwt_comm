@@ -200,59 +200,78 @@ let duplex ?(on_shutdown = on_shutdown_do_nothing) serverfunc =
 
 exception Server_shut_down
 
-let timeout_waiter timeout =
-  if timeout <= 0.
-  then
-    let (wai, _wak) = task () in
-    wai
-  else
-    Lwt_unix.sleep timeout >|= fun () -> `Timeout
+type _ wait =
+  | Time : float -> [ `Instances_exist of int | `Shut_down ] wait
+  | Forever : unit wait
+  | Don't : int wait
 
-let shutdown_server_wait ?(exn = Server_shut_down) ?(timeout = 0.) sctl =
+let shutdown_server_wait ?(exn = Server_shut_down)
+  sctl (type a) (wait : a wait) : a Lwt.t =
   let shutdown_return () =
     sctl.sc_state <- Ss_closed exn;
     Lazy.force sctl.sc_shtd;
     lwt () = sctl.sc_shtd_waiter in
-    return `Shut_down
+    return (begin
+      match wait with
+      | Time _ -> `Shut_down
+      | Forever -> ()
+      | Don't -> 0
+    end : a)
   in
   if sctl.instances = 0
   then
     shutdown_return ()
   else
-    let (cond, close_waiter_ref) =
-      match sctl.sc_state with
-      | Ss_closed _exn -> assert false
-          (* if server is closed, instances=0, this if-branch is unreachable. *)
-      | Ss_running ->
-          let cond = Lwt_condition.create () in
-          let close_waiter_ref = ref (Lwt_condition.wait cond) in
-          sctl.sc_state <- Ss_closing (exn, cond, close_waiter_ref);
-          (cond, close_waiter_ref)
-      | Ss_closing (_old_exn, cond, close_waiter_ref) ->
-          sctl.sc_state <- Ss_closing (exn, cond, close_waiter_ref);
-          (cond, close_waiter_ref)
-    in
-    let timeout_waiter = timeout_waiter timeout in
-    let rec loop () =
-      assert (sctl.instances > 0);
-      (* Printf.eprintf "shutdown_server_wait loop, %i more instances\n%!"
-        sctl.instances; *)
-      let close_waiter = !close_waiter_ref >|= fun () -> `Conn_closed in
-      lwt event = choose [timeout_waiter; close_waiter] in
-      let insts = sctl.instances in
-      match event with
-      | `Timeout -> return @@ `Instances_exist insts
-      | `Conn_closed ->
-          if insts = 0
-          then begin
-            cancel timeout_waiter;
-            shutdown_return ()
-          end else begin
-            close_waiter_ref := Lwt_condition.wait cond;
-            loop ()
+    let do_wait timeout_waiter =
+      let (cond, close_waiter_ref) =
+        match sctl.sc_state with
+        | Ss_closed _exn -> assert false
+            (* if server is closed, instances=0,
+               this if-branch is unreachable. *)
+        | Ss_running ->
+            let cond = Lwt_condition.create () in
+            let close_waiter_ref = ref (Lwt_condition.wait cond) in
+            sctl.sc_state <- Ss_closing (exn, cond, close_waiter_ref);
+            (cond, close_waiter_ref)
+        | Ss_closing (_old_exn, cond, close_waiter_ref) ->
+            sctl.sc_state <- Ss_closing (exn, cond, close_waiter_ref);
+            (cond, close_waiter_ref)
+      in
+      let rec loop () =
+        assert (sctl.instances > 0);
+        (* Printf.eprintf "shutdown_server_wait loop, %i more instances\n%!"
+          sctl.instances; *)
+        let close_waiter = !close_waiter_ref >|= fun () -> `Conn_closed in
+        lwt event = choose [timeout_waiter; close_waiter] in
+        let insts = sctl.instances in
+        match event with
+        | `Timeout -> return begin
+            match wait with
+            | Don't -> assert false
+            | Forever -> assert false
+            | Time _ -> (`Instances_exist insts : a)
           end
+        | `Conn_closed ->
+            if insts = 0
+            then begin
+              cancel timeout_waiter;
+              shutdown_return ()
+            end else begin
+              close_waiter_ref := Lwt_condition.wait cond;
+              loop ()
+            end
+      in
+        loop ()
     in
-      loop ()
+    match wait with
+    | Don't -> return (sctl.instances : a)
+    | Time t ->
+        if t < 0.
+        then fail @@ Invalid_argument
+          "Lwt_comm.shutdown_server_wait: negative timeout"
+        else
+          do_wait (Lwt_unix.sleep t >|= fun () -> `Timeout)
+    | Forever -> do_wait (let (wai, _wak) = task () in wai)
 
 let shutdown_server ?(exn = Server_shut_down) sctl =
   (*
@@ -262,14 +281,10 @@ let shutdown_server ?(exn = Server_shut_down) sctl =
   *)
   Hashtbl.iter (fun _cid closefunc -> closefunc exn) sctl.conns;
   Hashtbl.clear sctl.conns;
-  match_lwt shutdown_server_wait ~exn ~timeout:0. sctl with
-  | `Instances_exist _ -> assert false  (* timeout is infinite *)
-  | `Shut_down -> return_unit
+  shutdown_server_wait ~exn sctl Forever
 
 let shutdown_server_wait_infinite ?(exn = Server_shut_down) sctl =
-  match_lwt shutdown_server_wait ~timeout:0. ~exn sctl with
-  | `Instances_exist _n -> assert false
-  | `Shut_down -> return_unit
+  shutdown_server_wait ~exn sctl Forever
 
 let wait_for_server_shutdown sctl =
   sctl.sc_shtd_waiter
