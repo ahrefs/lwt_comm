@@ -53,6 +53,21 @@ type (-'req, +'resp, 'kind) server =
   ; sctl : server_ctl
   }
 
+let conn_names = ref []
+
+let conn_name c =
+  try
+    List.assq c.on_close !conn_names
+  with
+    Not_found -> "<nameless>"
+
+let set_conn_name c (n : string) =
+  try
+    conn_names := (c.on_close, List.assq c.on_close !conn_names ^ "=" ^ n)
+      :: !conn_names
+  with Not_found ->
+    conn_names := (c.on_close, n) :: !conn_names
+
 let ack conn =
   let s = conn.rcv_source in
   let st = s.so_state in
@@ -96,13 +111,19 @@ let send conn msg =
             | Some exn -> fail exn
 
 let recv_no_ack conn =
+  (* let () = Printf.eprintf "DBG: recv_no_ack %s\n%!" (conn_name conn) in *)
   let s = conn.rcv_source in
   try_lwt
     M.source_take s.so
+    (* >|= (fun m ->
+      Printf.eprintf "DBG: recv_no_ack %s done\n%!" (conn_name conn); m) *)
   with
-    Lwt_mq.Closed e -> fail e
+    Lwt_mq.Closed e ->
+      (* Printf.eprintf "DBG: recv_no_ack %s error\n%!" (conn_name conn); *)
+      fail e
 
 let recv_no_ack_res conn =
+  (* let () = Printf.eprintf "DBG: recv_no_ack_res\n%!" in *)
   try_lwt
     lwt r = recv_no_ack conn in
     return @@ `Ok r
@@ -110,6 +131,7 @@ let recv_no_ack_res conn =
     e -> return @@ `Error e
 
 let recv_no_ack_opt conn =
+  (* let () = Printf.eprintf "DBG: recv_no_ack_opt\n%!" in *)
   try
     lwt r = recv_no_ack conn in
     return @@ Some r
@@ -117,16 +139,19 @@ let recv_no_ack_opt conn =
     End_of_file -> return_none
 
 let recv conn =
+  (* let () = Printf.eprintf "DBG: recv\n%!" in *)
   lwt r = recv_no_ack conn in
   ack conn;
   return r
 
 let recv_opt conn =
+  (* let () = Printf.eprintf "DBG: recv_opt\n%!" in *)
   lwt r = recv_no_ack_opt conn in
   (match r with None -> () | Some _ -> ack conn);
   return r
 
 let recv_res conn =
+  (* let () = Printf.eprintf "DBG: recv_res\n%!" in *)
   lwt r = recv_no_ack_res conn in
   (match r with `Ok _ -> ack conn | `Error _ -> ());
   return r
@@ -143,6 +168,7 @@ let run_on_close conn =
   else ()
 
 let shutdown_sd exn conn =
+  (* let () = Printf.eprintf "DBG: shutdown_sd %s\n%!" (conn_name conn) in *)
   let sink = conn.snd_sink in
   let st = sink.si_state in
   match !st with
@@ -153,6 +179,7 @@ let shutdown_sd exn conn =
       run_on_close conn
 
 let shutdown_rc exn conn =
+  (* let () = Printf.eprintf "DBG: shutdown_rc %s\n%!" (conn_name conn) in *)
   let source = conn.rcv_source in
   let st = source.so_state in
   match !st with
@@ -583,3 +610,195 @@ let connect_unix unix_func sock_domain sock_type proto sock_addr =
     conn_pair ~ack_req:true ~ack_resp:false connect_unix_on_close in
   run_unix_func unix_func server_conn sock;
   return client_conn
+
+let stream_next_opt s =
+  try Some (Stream.next s) with Stream.Failure -> None
+
+let rec join_early_fail (lst : unit Lwt.t list) : unit Lwt.t =
+  if lst = []
+  then return_unit
+  else
+    lwt (ready, running) = nchoose_split lst in
+    assert (ready <> []);
+    join_early_fail running
+
+let reconnecting_server make_timeouts_stream (inner_server, inner_ctl) =
+  duplex begin fun client_conn ->
+    (*
+    set_conn_name client_conn "client<->reconnector";
+    let conn_num = ref 0 in
+    *)
+
+    let make_server_conn () =
+      let c = connect inner_server ~ack_req:true ~ack_resp:false in
+      (*
+      incr conn_num;
+      set_conn_name c @@ Printf.sprintf "reconnector<->server#%i" !conn_num;
+      *)
+      return @@ `Conn c
+    in
+    let server_conn_ref = ref (make_server_conn ()) in
+
+    (* locked when reconnecting; unlocked -> server_conn_ref = Some _ *)
+    let conn_mut = Lwt_mutex.create () in
+
+    let get_server_conn () =
+      if Lwt_mutex.is_locked conn_mut
+      then
+        Lwt_mutex.with_lock conn_mut @@ fun () -> !server_conn_ref
+      else
+        !server_conn_ref
+    in
+
+    let timeouts_stream = make_timeouts_stream () in
+
+    let reconnect =
+      let reconn_thread = ref None in
+      let s2c_reconn_cond = Lwt_condition.create () in
+      fun initiator e ->
+        match initiator, !reconn_thread with
+        | (`C2S | `S2C), Some th ->
+            (* Printf.eprintf "re: joining reconn thread\n%!"; *)
+            th
+        | `C2S, None ->
+            (* before reconnecting initiated from `C2S (error sending client
+               message to server): receive all messages sent by server: don't
+               reconnect now. *)
+            (* Printf.eprintf "re: c2s: waiting on cond\n%!"; *)
+            Lwt_condition.wait s2c_reconn_cond
+        | `S2C, None ->
+            let th = Lwt_mutex.with_lock conn_mut @@ fun () ->
+              (* Printf.eprintf "re: start reconnecting\n%!"; *)
+              lwt () =
+                match stream_next_opt timeouts_stream with
+                | None ->
+                    server_conn_ref := (return @@ `Stopped e);
+                    return_unit
+                | Some t ->
+                    server_conn_ref := (return `Reconnecting);
+                    lwt () = Lwt_unix.sleep t in
+                    server_conn_ref := make_server_conn ();
+                    (* Printf.eprintf "re: reconnected\n%!"; *)
+                    return_unit
+              in
+                Lwt_condition.signal s2c_reconn_cond ();
+                reconn_thread := None;
+                return_unit
+            in
+              reconn_thread := Some th;
+              th
+    in
+
+    let rec client_to_server () =
+      match_lwt recv_no_ack_res client_conn with
+      | `Error exn -> begin
+          (* Printf.eprintf "re/c2s: error from client: %s\n%!"
+            (Printexc.to_string exn); *)
+          shutdown ~exn client_conn Unix.SHUTDOWN_RECEIVE;
+          match_lwt get_server_conn () with
+          | `Stopped _exn -> return_unit
+          | `Reconnecting -> assert false
+          | `Conn server_conn ->
+              (* Printf.eprintf "re/c2s: shutdown_send server_conn\n%!"; *)
+              shutdown server_conn ~exn Unix.SHUTDOWN_SEND;
+              server_conn_ref := (return @@ `Stopped exn);
+              return_unit
+        end
+      | `Ok msg ->
+          let rec send_to_server () =
+            (* Printf.eprintf "re/c2s: send loop\n%!"; *)
+            match_lwt get_server_conn () with
+            | `Reconnecting -> assert false
+            | `Stopped exn ->
+                shutdown client_conn ~exn Unix.SHUTDOWN_RECEIVE;
+                return `Stop
+            | `Conn server_conn ->
+                (* Printf.eprintf "re/c2s: send loop `Conn %s : %i\n%!"
+                  (conn_name server_conn) (Obj.magic msg); *)
+                match_lwt
+                  try_lwt
+                    lwt () = send server_conn msg in return `Ok
+                  with e -> return @@ `Error e
+                with
+                | `Ok -> ack client_conn; return `Continue
+                | `Error exn ->
+                    (* Printf.eprintf
+                      "re/c2s: send loop: error sending to %s\n%!"
+                      (conn_name server_conn); *)
+                    shutdown server_conn ~exn Unix.SHUTDOWN_SEND;
+                    reconnect `C2S exn >>= send_to_server
+          in
+          match_lwt send_to_server () with
+          | `Continue ->
+              (* Printf.eprintf "re/c2s: cont\n%!"; *)
+              client_to_server ()
+          | `Stop ->
+              (* Printf.eprintf "re/c2s: stop\n%!"; *)
+              return_unit
+    in
+
+    let rec server_to_client () =
+      let rec recv_from_server () =
+        (* Printf.eprintf "re/s2c: recv loop\n%!"; *)
+        match_lwt get_server_conn () with
+        | `Reconnecting -> assert false
+        | `Stopped exn ->
+            (* Printf.eprintf "re/s2c: recv loop: `Stopped\n%!"; *)
+            shutdown client_conn ~exn Unix.SHUTDOWN_SEND;
+            return `Stop
+        | `Conn server_conn ->
+            (* Printf.eprintf "re/s2c: recv loop: `Conn %s\n%!"
+              (conn_name server_conn); *)
+            match_lwt recv_res server_conn with
+            | (`Ok _msg) as r ->
+                (* Printf.eprintf "re/s2c: recv loop: `Conn %s / `Ok\n%!"
+                  (conn_name server_conn); *)
+                return r
+            | `Error exn ->
+                (* Printf.eprintf "re/s2c: recv loop: `Conn %s / `Error\n%!"
+                  (conn_name server_conn); *)
+                match_lwt get_server_conn () with
+                | `Reconnecting -> assert false
+                | `Stopped _exn -> return `Stop
+                | `Conn server_conn ->
+                    shutdown server_conn ~exn Unix.SHUTDOWN_ALL;
+                    reconnect `S2C exn >>= recv_from_server
+      in
+      match_lwt recv_from_server () with
+      | `Stop -> return_unit
+      | `Ok msg ->
+          (* Printf.eprintf "re/s2c: received from server, sending to %s\n%!"
+            (conn_name client_conn); *)
+          match_lwt
+            try_lwt
+              lwt () = send client_conn msg in return `Ok
+            with e -> return @@ `Error e
+          with
+          | `Ok ->
+              (* Printf.eprintf "re/s2c: sent to client ok\n%!"; *)
+              server_to_client ()
+          | `Error exn ->
+              (* Printf.eprintf "re/s2c: error sending to client\n%!"; *)
+              shutdown client_conn ~exn Unix.SHUTDOWN_SEND;
+              match_lwt get_server_conn () with
+              | `Reconnecting -> assert false
+              | `Stopped _exn -> return_unit
+              | `Conn server_conn ->
+                  shutdown server_conn ~exn Unix.SHUTDOWN_ALL;
+                  return_unit
+    in
+      join_early_fail [ client_to_server () ; server_to_client () ]
+(*
+        [ (try_lwt client_to_server ()
+           with e -> Printf.eprintf "c2s error\n%!"; fail e
+          )
+        ; (try_lwt server_to_client ()
+           with e -> Printf.eprintf "s2c error\n%!"; fail e
+          )
+        ]
+*)
+  end
+  ~on_shutdown: begin fun () ->
+    lwt () = shutdown_server inner_ctl in
+    return_unit
+  end

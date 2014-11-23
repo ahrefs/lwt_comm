@@ -1,5 +1,5 @@
 # OASIS_START
-# DO NOT EDIT (digest: 0fa3c543f29b0d24bad564aaed07f45f)
+# DO NOT EDIT (digest: 9f4957514c7bf69cbf9fa163dc43c7d2)
 # Ignore VCS directories, you can use the same kind of rule outside
 # OASIS_START/STOP if you want to exclude directories that contains
 # useless stuff for the build process
@@ -38,6 +38,11 @@
 "tests/fail_before_ack.byte": pkg_lwt.unix
 "tests/fail_before_ack.byte": pkg_lwt_mq
 "tests/fail_before_ack.byte": use_lwt_comm
+# Executable reconnect_test
+"tests/reconnect_test.byte": pkg_lwt
+"tests/reconnect_test.byte": pkg_lwt.unix
+"tests/reconnect_test.byte": pkg_lwt_mq
+"tests/reconnect_test.byte": use_lwt_comm
 # Executable misc_tests
 "tests/misc_tests.byte": pkg_lwt
 "tests/misc_tests.byte": pkg_lwt.unix

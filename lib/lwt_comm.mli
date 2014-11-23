@@ -216,3 +216,30 @@ val connect_unix :
   Lwt_unix.socket_domain -> Lwt_unix.socket_type -> int (* proto; 0 *) ->
   Lwt_unix.sockaddr ->
   ('req, 'resp, 'k) conn Lwt.t
+
+(** Create new server ("outer server") that automates reconnections to server
+    given as argument ("inner server").  This is useful only when inner server
+    doesn't initiate connection closure.
+    Also protocol must support reconnects (for example, it must not use
+    specific connection procedure).
+    For every connection to outer server there exists one connection to inner
+    server.
+    When connection to outer server is open, and inner server closes
+    connection, reconnect happens, and outer server resends last non-ACKed
+    message to new connection (it means that server must respect ACKs,
+    otherwise there will be nothing to resend).
+    First argument is used to create per-connection stream with reconnection
+    timeouts in seconds.  End of stream means "stop reconnecting".  For
+    example, when reconnection must be immediate and non-stop, one can use
+    [Stream.from (fun () -> Some 0.)] as an argument.
+ *)
+val reconnecting_server :
+  (unit -> float Stream.t) ->
+  (('req, 'resp, [> `Connect | `Bidi ]) server * server_ctl) ->
+  (('req, 'resp, [> `Connect | `Bidi ]) server * server_ctl)
+
+(* Connection names can be used for debug purposes.  Note: when connection's
+   name is registered, there is no way to unregister it and to free memory,
+   so use this in short tests only. *)
+val set_conn_name : ('a, 'b, 'c) conn -> string -> unit
+val conn_name : ('a, 'b, 'c) conn -> string

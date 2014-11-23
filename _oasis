@@ -37,6 +37,12 @@ Executable fail_before_ack
   BuildDepends: lwt_comm
   Install: false
 
+Executable reconnect_test
+  Path: tests
+  MainIs: reconnect_test.ml
+  BuildDepends: lwt_comm
+  Install: false
+
 Executable misc_tests
   Path: tests
   MainIs: misc_tests.ml
