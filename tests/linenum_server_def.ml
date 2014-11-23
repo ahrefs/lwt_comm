@@ -1,7 +1,7 @@
 open Lwt
 open Linenum_common
 
-let make_linenum_server () = C.duplex begin fun conn ->
+let make_linenum_server ?(limit=0) () = C.duplex begin fun conn ->
   let rec loop n =
     match_lwt C.recv_opt conn with
     | None ->
@@ -12,7 +12,12 @@ let make_linenum_server () = C.duplex begin fun conn ->
         let out = string_of_int n ^ ": " ^ line in
         lwt () = C.send conn out in
         (* Printf.eprintf "ls: responded\n%!"; *)
-        loop (n + 1)
+        if n = limit
+        then begin
+          C.shutdown conn Unix.SHUTDOWN_ALL;
+          return_unit
+        end else
+          loop (n + 1)
   in
     try_lwt
       loop 1

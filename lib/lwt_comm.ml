@@ -9,8 +9,8 @@ type link_state =
 
 type ack_sync =
   | No_acks
-  | Acks of Lwt_mutex.t * Lwt_mutex.t
-      (** outer mutex, ack mutex *)
+  | Acks of Lwt_mutex.t * exn option Lwt_condition.t
+      (** outer mutex, ack condvar *)
 
 type -'a mq_sink =
   { si : 'a M.sink
@@ -64,30 +64,36 @@ let ack conn =
   | St_ready, No_acks -> ()
   | St_waiting_ack, Acks (_o, a) ->
       st := St_ready;
-      Lwt_mutex.unlock a
+      Lwt_condition.signal a None
 
 let send conn msg =
   let s = conn.snd_sink in
   let acks = s.si_acks in
   let st = s.si_state in
-  match acks, !st with
-  | _, St_waiting_ack -> assert false
-  | _, St_closed exn -> fail exn
-  | No_acks, St_ready -> M.sink_put s.si msg
-  | Acks (o, a), St_ready ->
+  match acks with
+  | No_acks -> begin
+      match !st with
+      | St_waiting_ack -> assert false
+      | St_closed exn -> fail exn
+      | St_ready -> M.sink_put s.si msg
+    end
+  | Acks (o, a) ->
       Lwt_mutex.with_lock o @@ fun () ->
-        st := St_waiting_ack;
-        assert (not (Lwt_mutex.is_locked a));
-        lwt () = Lwt_mutex.lock a in
-        let put = M.sink_put s.si msg in
-        on_cancel put (fun () -> st := St_ready);
-        lwt () = put in
-        (* waiting; [ack] and [close] unlock it *)
-        Lwt_mutex.with_lock a @@ fun () ->
         match !st with
         | St_waiting_ack -> assert false
         | St_closed exn -> fail exn
-        | St_ready -> return_unit
+        | St_ready ->
+            st := St_waiting_ack;
+            let reset_st () = if !st = St_waiting_ack then st := St_ready in
+            let wait_ack = Lwt_condition.wait a in
+            on_cancel wait_ack reset_st;
+            let put = M.sink_put s.si msg in
+            on_cancel put (fun () -> reset_st (); cancel wait_ack);
+            lwt () = put in
+            (* waiting; [ack] and [close] signal it *)
+            match_lwt wait_ack with
+            | None -> return_unit
+            | Some exn -> fail exn
 
 let recv_no_ack conn =
   let s = conn.rcv_source in
@@ -117,12 +123,12 @@ let recv conn =
 
 let recv_opt conn =
   lwt r = recv_no_ack_opt conn in
-  ack conn;
+  (match r with None -> () | Some _ -> ack conn);
   return r
 
 let recv_res conn =
   lwt r = recv_no_ack_res conn in
-  ack conn;
+  (match r with `Ok _ -> ack conn | `Error _ -> ());
   return r
 
 let is_state_closed st =
@@ -153,10 +159,10 @@ let shutdown_rc exn conn =
   | St_closed _ -> ()
   | St_waiting_ack | St_ready ->
       source.so_state := St_closed exn;
-      (* unlock sender that waits for ACK (if any) *)
+      (* signal to sender that waits for ACK (if any) *)
       begin match source.so_acks with
       | No_acks -> ()
-      | Acks (_o, a) -> Lwt_mutex.unlock a
+      | Acks (_o, a) -> Lwt_condition.signal a (Some exn)
       end;
       (* kill (on_recv:true) all other senders and close source *)
       M.close_source source.so exn ~on_recv:true;
@@ -319,7 +325,7 @@ let si_so_link acks =
   in
   let acks =
     if acks
-    then Acks (Lwt_mutex.create (), Lwt_mutex.create ())
+    then Acks (Lwt_mutex.create (), Lwt_condition.create ())
     else No_acks
   in
   let closed = ref St_ready in
