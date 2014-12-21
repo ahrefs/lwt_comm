@@ -44,4 +44,4 @@
 <tests/*.ml{,i}>: use_lwt_comm
 # OASIS_STOP
 
-<**/*.ml{,i}>: warn_A, debug, pkg_lwt.syntax
+<**/*.ml{,i}>: warn(A-48), debug, pkg_lwt.syntax

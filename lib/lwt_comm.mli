@@ -61,6 +61,9 @@ type (-'snd, +'rcv, 'kind) conn
  *)
 val send : ('snd, 'rcv, 'kind) conn -> 'snd -> unit Lwt.t
 
+val send_res : ('snd, 'rcv, 'kind) conn -> 'snd ->
+               [ `Ok of unit | `Error of exn ] Lwt.t
+
 (** Receive message from connection and don't send ACK.
     Raises exception when connection is closed.
     When message is processed, call [ack conn] on success or close connection
@@ -238,8 +241,44 @@ val reconnecting_server :
   (('req, 'resp, [> `Connect | `Bidi ]) server * server_ctl) ->
   (('req, 'resp, [> `Connect | `Bidi ]) server * server_ctl)
 
-(* Connection names can be used for debug purposes.  Note: when connection's
-   name is registered, there is no way to unregister it and to free memory,
-   so use this in short tests only. *)
+(** Switch is a server ("outer server") that allows one to communicate with
+    different instances of servers ("inner servers") depending on "key" (part
+    of request).  It's like a "pool", but instead of spawning some number of
+    equal server instances it opens one connection per key.  There must be
+    specified a way to get key from request sent to outer server.  Keys must be
+    ordered with [?key_compare] optional argument (default is
+    [Pervasives.compare]).
+
+             /-switch-server (outer)-\            /---connection-for---\
+             |                       |            |-this-request's-key-|
+             |       split:          |            |                    |
+     'orq -> | 'orq -> ('key * 'irq) | -> 'irq -> |    -->-->-->-\     |
+             |                       |            |              |     |
+             |      combine¹:        |            |              |     |
+     'ors <- | 'key -> 'irs -> 'ors  | <- 'irs <- |    --<--<--<-/     |
+             |                       |            |                    |
+             \-----------------------/            \--------------------/
+
+     ¹ -- actual type is more complex and gives user more power.
+
+    Functional argument with type ['key -> ('irq, 'irs, [> `Bidi ]) conn] can,
+    for example,
+    - spawn servers
+    - remember and reuse connections to servers for every ['key] and return it
+    - connect to some server, tell it "this connection will work with this
+      specific key" and return this "initialized" connection
+ *)
+val switch :
+  ?key_compare:('key -> 'key -> int) ->
+  split:('orq -> ('key * 'irq)) ->
+  combine:('key ->
+           [ `Ok of 'irs | `Error of exn ] ->
+           [ `Ok of 'ors | `Error of exn ]) ->
+  ('key -> ('irq, 'irs, [> `Bidi ]) conn) ->
+  ('orq, 'ors, [> `Connect | `Bidi ]) server * server_ctl
+
+(** Connection names can be used for debug purposes.  Note: when connection's
+    name is registered, there is no way to unregister it and to free memory,
+    so use this in short tests only. *)
 val set_conn_name : ('a, 'b, 'c) conn -> string -> unit
 val conn_name : ('a, 'b, 'c) conn -> string

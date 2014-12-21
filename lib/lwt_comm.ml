@@ -62,6 +62,7 @@ let conn_name c =
     Not_found -> "<nameless>"
 
 let set_conn_name c (n : string) =
+  let n = "[" ^ n ^ "]" in
   try
     conn_names := (c.on_close, List.assq c.on_close !conn_names ^ "=" ^ n)
       :: !conn_names
@@ -110,20 +111,43 @@ let send conn msg =
             | None -> return_unit
             | Some exn -> fail exn
 
+let ok_unit = `Ok ()
+let ret_ok_unit = fun () -> return ok_unit
+
+let send_res_counter = ref 0
+
+let send_res conn msg =
+  catch
+    (fun () ->
+       incr send_res_counter;
+       (*- Printf.eprintf "send_res: %s %i: before\n%!"
+         (conn_name conn) !send_res_counter; -*)
+       send conn msg >>= ret_ok_unit
+       (*- >|= fun r -> Printf.eprintf "send_res: %s %i: ok\n%!"
+                      (conn_name conn) !send_res_counter; r -*)
+    )
+    (fun e ->
+       (*- Printf.eprintf "send_res: %s %i: error\n%!"
+         (conn_name conn) !send_res_counter; -*)
+       return (`Error e)
+    )
+
 let recv_no_ack conn =
-  (* let () = Printf.eprintf "DBG: recv_no_ack %s\n%!" (conn_name conn) in *)
+  (*- let () = Printf.eprintf "DBG: recv_no_ack %s\n%!" (conn_name conn) in -*)
   let s = conn.rcv_source in
   try_lwt
     M.source_take s.so
-    (* >|= (fun m ->
-      Printf.eprintf "DBG: recv_no_ack %s done\n%!" (conn_name conn); m) *)
+    (*- >|= (fun m ->
+      Printf.eprintf "DBG: recv_no_ack %s done\n%!" (conn_name conn); m) -*)
   with
     Lwt_mq.Closed e ->
-      (* Printf.eprintf "DBG: recv_no_ack %s error\n%!" (conn_name conn); *)
+      (*- Printf.eprintf "DBG: recv_no_ack %s error: %s\n%!" (conn_name conn)
+        (Printexc.to_string e); -*)
       fail e
 
 let recv_no_ack_res conn =
-  (* let () = Printf.eprintf "DBG: recv_no_ack_res\n%!" in *)
+  (*- let () = Printf.eprintf "DBG: recv_no_ack_res %s\n%!"
+    (conn_name conn) in -*)
   try_lwt
     lwt r = recv_no_ack conn in
     return @@ `Ok r
@@ -131,7 +155,7 @@ let recv_no_ack_res conn =
     e -> return @@ `Error e
 
 let recv_no_ack_opt conn =
-  (* let () = Printf.eprintf "DBG: recv_no_ack_opt\n%!" in *)
+  (*- let () = Printf.eprintf "DBG: recv_no_ack_opt\n%!" in -*)
   try
     lwt r = recv_no_ack conn in
     return @@ Some r
@@ -139,22 +163,32 @@ let recv_no_ack_opt conn =
     End_of_file -> return_none
 
 let recv conn =
-  (* let () = Printf.eprintf "DBG: recv\n%!" in *)
+  (*- let () = Printf.eprintf "DBG: recv\n%!" in -*)
   lwt r = recv_no_ack conn in
   ack conn;
   return r
 
 let recv_opt conn =
-  (* let () = Printf.eprintf "DBG: recv_opt\n%!" in *)
+  (*- let () = Printf.eprintf "DBG: recv_opt\n%!" in -*)
   lwt r = recv_no_ack_opt conn in
   (match r with None -> () | Some _ -> ack conn);
   return r
 
 let recv_res conn =
-  (* let () = Printf.eprintf "DBG: recv_res\n%!" in *)
-  lwt r = recv_no_ack_res conn in
-  (match r with `Ok _ -> ack conn | `Error _ -> ());
-  return r
+  (*- let () = Printf.eprintf "DBG: recv_res %s\n%!" (conn_name conn) in -*)
+  try_lwt
+    lwt r = recv_no_ack conn in
+    (*- let () = Printf.eprintf "DBG: recv_res %s: before ack\n%!"
+      (conn_name conn) in -*)
+    ack conn;
+    (*- let () = Printf.eprintf "DBG: recv_res %s: after ack\n%!"
+      (conn_name conn) in -*)
+    return @@ `Ok r
+  with
+    e ->
+      (*- Printf.eprintf "DBG: recv_res %s: %s\n%!" (Printexc.to_string e)
+        (conn_name conn); -*)
+      return @@ `Error e
 
 let is_state_closed st =
   match !st with
@@ -168,7 +202,7 @@ let run_on_close conn =
   else ()
 
 let shutdown_sd exn conn =
-  (* let () = Printf.eprintf "DBG: shutdown_sd %s\n%!" (conn_name conn) in *)
+  (*- let () = Printf.eprintf "DBG: shutdown_sd %s\n%!" (conn_name conn) in -*)
   let sink = conn.snd_sink in
   let st = sink.si_state in
   match !st with
@@ -179,7 +213,7 @@ let shutdown_sd exn conn =
       run_on_close conn
 
 let shutdown_rc exn conn =
-  (* let () = Printf.eprintf "DBG: shutdown_rc %s\n%!" (conn_name conn) in *)
+  (*- let () = Printf.eprintf "DBG: shutdown_rc %s\n%!" (conn_name conn) in -*)
   let source = conn.rcv_source in
   let st = source.so_state in
   match !st with
@@ -307,11 +341,11 @@ let shutdown_server_wait ?(exn = Server_shut_down)
     | Forever -> do_wait (let (wai, _wak) = task () in wai)
 
 let shutdown_server ?(exn = Server_shut_down) sctl =
-  (*
+  (*-
   Printf.eprintf
     "shutdown_server: conns: %i instances: %i\n%!"
     (Hashtbl.length sctl.conns) sctl.instances;
-  *)
+  -*)
   Hashtbl.iter (fun _cid closefunc -> closefunc exn) sctl.conns;
   Hashtbl.clear sctl.conns;
   shutdown_server_wait ~exn sctl Forever
@@ -330,7 +364,9 @@ let run_lwt_server server server_conn =
     close server_conn;
     return_unit
   with exn ->
+    (*- Printf.eprintf "server/error: before close\n%!"; -*)
     close server_conn ~exn;
+    (*- Printf.eprintf "server/error: after close\n%!"; -*)
     return_unit
   finally
     ctl.instances <- ctl.instances - 1;
@@ -400,6 +436,7 @@ let map_conn map_req map_resp conn =
   ; rcv_source = map_source map_resp conn.rcv_source
   ; on_close = conn.on_close
   }
+  (*- |> fun c -> set_conn_name c (conn_name conn ^ "/mapped"); c -*)
 
 let map_server map_req map_resp server =
   let old_shandler = server.shandler in
@@ -425,7 +462,11 @@ let connect
         conn_pair ~ack_req ~ack_resp on_conn_close in
       let closefunc exn = close client_conn ~exn in
       Hashtbl.add server.sctl.conns conn_id closefunc;
-      Lwt.ignore_result (run_lwt_server server server_conn);
+      Lwt.ignore_result begin
+        (*- try_lwt -*)
+          run_lwt_server server server_conn
+        (*- with e -> Printf.eprintf "connect/run error\n%!"; fail e -*)
+      end;
       client_conn
   | Ss_closed exn | Ss_closing (exn, _, _) -> raise exn
 
@@ -442,17 +483,17 @@ type (+'req, -'resp, 'k) unix_func =
 
 let run_unix_func func conn fd =
   ignore_result begin
-    (* Printf.eprintf "run unix func: 0\n%!"; *)
+    (*- Printf.eprintf "run unix func: 0\n%!"; -*)
     lwt () = func conn fd in
-    (* Printf.eprintf "run unix func: 1\n%!"; *)
+    (*- Printf.eprintf "run unix func: 1\n%!"; -*)
     close conn;
-    (* Printf.eprintf "run unix func: 2\n%!"; *)
+    (*- Printf.eprintf "run unix func: 2\n%!"; -*)
     lwt () =
       if Lwt_unix.state fd = Lwt_unix.Closed
       then return_unit
       else Lwt_unix.close fd
     in
-    (* Printf.eprintf "run unix func: 3\n%!"; *)
+    (*- Printf.eprintf "run unix func: 3\n%!"; -*)
     return_unit
   end
 
@@ -540,7 +581,7 @@ let unix_func_of_maps
         return @@ `From_conn resp_res
       in
       let rec loop ths =
-        (* Printf.eprintf "loop, ths=%i\n%!" (List.length ths); *)
+        (*- Printf.eprintf "loop, ths=%i\n%!" (List.length ths); -*)
         if ths = []
         then
           return_unit
@@ -550,11 +591,11 @@ let unix_func_of_maps
             Lwt_list.fold_left_s begin
               fun ths -> function
               | `From_inch (Some req) ->
-                  (* Printf.eprintf "unix_func_of_maps: inch/some\n%!"; *)
+                  (*- Printf.eprintf "unix_func_of_maps: inch/some\n%!"; -*)
                   lwt () = send conn req in
                   return @@ make_inch_reader () :: ths
               | `From_conn (`Ok resp) ->
-                  (* Printf.eprintf "unix_func_of_maps: conn/resp\n%!"; *)
+                  (*- Printf.eprintf "unix_func_of_maps: conn/resp\n%!"; -*)
                   lwt send_res =
                     try_lwt
                       lwt () = resp_to_outch outch resp in
@@ -572,11 +613,11 @@ let unix_func_of_maps
                       return_nil
                   end
               | `From_inch None ->
-                  (* Printf.eprintf "unix_func_of_maps: inch/none\n%!"; *)
+                  (*- Printf.eprintf "unix_func_of_maps: inch/none\n%!"; -*)
                   shutdown conn Unix.SHUTDOWN_SEND;
                   return ths
               | `From_conn (`Error exn) ->
-                  (* Printf.eprintf "unix_func_of_maps: conn/err\n%!"; *)
+                  (*- Printf.eprintf "unix_func_of_maps: conn/err\n%!"; -*)
                   lwt () = on_server_close inch outch exn in
                   lwt () =
                     if Lwt_unix.state fd = Lwt_unix.Opened
@@ -624,17 +665,17 @@ let rec join_early_fail (lst : unit Lwt.t list) : unit Lwt.t =
 
 let reconnecting_server make_timeouts_stream (inner_server, inner_ctl) =
   duplex begin fun client_conn ->
-    (*
+    (*-
     set_conn_name client_conn "client<->reconnector";
     let conn_num = ref 0 in
-    *)
+    -*)
 
     let make_server_conn () =
       let c = connect inner_server ~ack_req:true ~ack_resp:false in
-      (*
+      (*-
       incr conn_num;
       set_conn_name c @@ Printf.sprintf "reconnector<->server#%i" !conn_num;
-      *)
+      -*)
       return @@ `Conn c
     in
     let server_conn_ref = ref (make_server_conn ()) in
@@ -658,17 +699,17 @@ let reconnecting_server make_timeouts_stream (inner_server, inner_ctl) =
       fun initiator e ->
         match initiator, !reconn_thread with
         | (`C2S | `S2C), Some th ->
-            (* Printf.eprintf "re: joining reconn thread\n%!"; *)
+            (*- Printf.eprintf "re: joining reconn thread\n%!"; -*)
             th
         | `C2S, None ->
             (* before reconnecting initiated from `C2S (error sending client
                message to server): receive all messages sent by server: don't
                reconnect now. *)
-            (* Printf.eprintf "re: c2s: waiting on cond\n%!"; *)
+            (*- Printf.eprintf "re: c2s: waiting on cond\n%!"; -*)
             Lwt_condition.wait s2c_reconn_cond
         | `S2C, None ->
             let th = Lwt_mutex.with_lock conn_mut @@ fun () ->
-              (* Printf.eprintf "re: start reconnecting\n%!"; *)
+              (*- Printf.eprintf "re: start reconnecting\n%!"; -*)
               lwt () =
                 match stream_next_opt timeouts_stream with
                 | None ->
@@ -678,7 +719,7 @@ let reconnecting_server make_timeouts_stream (inner_server, inner_ctl) =
                     server_conn_ref := (return `Reconnecting);
                     lwt () = Lwt_unix.sleep t in
                     server_conn_ref := make_server_conn ();
-                    (* Printf.eprintf "re: reconnected\n%!"; *)
+                    (*- Printf.eprintf "re: reconnected\n%!"; -*)
                     return_unit
               in
                 Lwt_condition.signal s2c_reconn_cond ();
@@ -692,71 +733,67 @@ let reconnecting_server make_timeouts_stream (inner_server, inner_ctl) =
     let rec client_to_server () =
       match_lwt recv_no_ack_res client_conn with
       | `Error exn -> begin
-          (* Printf.eprintf "re/c2s: error from client: %s\n%!"
-            (Printexc.to_string exn); *)
+          (*- Printf.eprintf "re/c2s: error from client: %s\n%!"
+            (Printexc.to_string exn); -*)
           shutdown ~exn client_conn Unix.SHUTDOWN_RECEIVE;
           match_lwt get_server_conn () with
           | `Stopped _exn -> return_unit
           | `Reconnecting -> assert false
           | `Conn server_conn ->
-              (* Printf.eprintf "re/c2s: shutdown_send server_conn\n%!"; *)
+              (*- Printf.eprintf "re/c2s: shutdown_send server_conn\n%!"; -*)
               shutdown server_conn ~exn Unix.SHUTDOWN_SEND;
               server_conn_ref := (return @@ `Stopped exn);
               return_unit
         end
       | `Ok msg ->
           let rec send_to_server () =
-            (* Printf.eprintf "re/c2s: send loop\n%!"; *)
+            (*- Printf.eprintf "re/c2s: send loop\n%!"; -*)
             match_lwt get_server_conn () with
             | `Reconnecting -> assert false
             | `Stopped exn ->
                 shutdown client_conn ~exn Unix.SHUTDOWN_RECEIVE;
                 return `Stop
             | `Conn server_conn ->
-                (* Printf.eprintf "re/c2s: send loop `Conn %s : %i\n%!"
-                  (conn_name server_conn) (Obj.magic msg); *)
-                match_lwt
-                  try_lwt
-                    lwt () = send server_conn msg in return `Ok
-                  with e -> return @@ `Error e
-                with
-                | `Ok -> ack client_conn; return `Continue
+                (*- Printf.eprintf "re/c2s: send loop `Conn %s : %i\n%!"
+                  (conn_name server_conn) (Obj.magic msg); -*)
+                match_lwt send_res server_conn msg with
+                | `Ok () -> ack client_conn; return `Continue
                 | `Error exn ->
-                    (* Printf.eprintf
+                    (*- Printf.eprintf
                       "re/c2s: send loop: error sending to %s\n%!"
-                      (conn_name server_conn); *)
+                      (conn_name server_conn); -*)
                     shutdown server_conn ~exn Unix.SHUTDOWN_SEND;
                     reconnect `C2S exn >>= send_to_server
           in
           match_lwt send_to_server () with
           | `Continue ->
-              (* Printf.eprintf "re/c2s: cont\n%!"; *)
+              (*- Printf.eprintf "re/c2s: cont\n%!"; -*)
               client_to_server ()
           | `Stop ->
-              (* Printf.eprintf "re/c2s: stop\n%!"; *)
+              (*- Printf.eprintf "re/c2s: stop\n%!"; -*)
               return_unit
     in
 
     let rec server_to_client () =
       let rec recv_from_server () =
-        (* Printf.eprintf "re/s2c: recv loop\n%!"; *)
+        (*- Printf.eprintf "re/s2c: recv loop\n%!"; -*)
         match_lwt get_server_conn () with
         | `Reconnecting -> assert false
         | `Stopped exn ->
-            (* Printf.eprintf "re/s2c: recv loop: `Stopped\n%!"; *)
+            (*- Printf.eprintf "re/s2c: recv loop: `Stopped\n%!"; -*)
             shutdown client_conn ~exn Unix.SHUTDOWN_SEND;
             return `Stop
         | `Conn server_conn ->
-            (* Printf.eprintf "re/s2c: recv loop: `Conn %s\n%!"
-              (conn_name server_conn); *)
+            (*- Printf.eprintf "re/s2c: recv loop: `Conn %s\n%!"
+              (conn_name server_conn); -*)
             match_lwt recv_res server_conn with
             | (`Ok _msg) as r ->
-                (* Printf.eprintf "re/s2c: recv loop: `Conn %s / `Ok\n%!"
-                  (conn_name server_conn); *)
+                (*- Printf.eprintf "re/s2c: recv loop: `Conn %s / `Ok\n%!"
+                  (conn_name server_conn); -*)
                 return r
             | `Error exn ->
-                (* Printf.eprintf "re/s2c: recv loop: `Conn %s / `Error\n%!"
-                  (conn_name server_conn); *)
+                (*- Printf.eprintf "re/s2c: recv loop: `Conn %s / `Error\n%!"
+                  (conn_name server_conn); -*)
                 match_lwt get_server_conn () with
                 | `Reconnecting -> assert false
                 | `Stopped _exn -> return `Stop
@@ -767,18 +804,14 @@ let reconnecting_server make_timeouts_stream (inner_server, inner_ctl) =
       match_lwt recv_from_server () with
       | `Stop -> return_unit
       | `Ok msg ->
-          (* Printf.eprintf "re/s2c: received from server, sending to %s\n%!"
-            (conn_name client_conn); *)
-          match_lwt
-            try_lwt
-              lwt () = send client_conn msg in return `Ok
-            with e -> return @@ `Error e
-          with
-          | `Ok ->
-              (* Printf.eprintf "re/s2c: sent to client ok\n%!"; *)
+          (*- Printf.eprintf "re/s2c: received from server, sending to %s\n%!"
+            (conn_name client_conn); -*)
+          match_lwt send_res client_conn msg with
+          | `Ok () ->
+              (*- Printf.eprintf "re/s2c: sent to client ok\n%!"; -*)
               server_to_client ()
           | `Error exn ->
-              (* Printf.eprintf "re/s2c: error sending to client\n%!"; *)
+              (*- Printf.eprintf "re/s2c: error sending to client\n%!"; -*)
               shutdown client_conn ~exn Unix.SHUTDOWN_SEND;
               match_lwt get_server_conn () with
               | `Reconnecting -> assert false
@@ -801,4 +834,167 @@ let reconnecting_server make_timeouts_stream (inner_server, inner_ctl) =
   ~on_shutdown: begin fun () ->
     lwt () = shutdown_server inner_ctl in
     return_unit
+  end
+
+
+let switch (type k) ?(key_compare = Pervasives.compare)
+ ~split ~combine make_conn =
+  let module Key =
+    struct
+      type t = k
+      let compare = key_compare
+    end
+  in
+  let module Kmap = Map.Make(Key) in
+  let kmap_find_opt k m = try Some (Kmap.find k m) with Not_found -> None in
+  let ret_cont = return `Continue in
+  duplex begin fun client_conn ->
+    let kmap = ref Kmap.empty in
+    let closed_client_on_send = ref None in
+    let client_closed_on_recv = ref false in
+    let close_client_on_send exn =
+      closed_client_on_send := Some exn
+    in
+    let close_s2c_loops exn =
+      Kmap.iter (fun _key c -> close ~exn c) !kmap;
+      kmap := Kmap.empty
+    in
+    let stop_switch = Lwt_condition.create () in
+    let s2c_sender_mq = Lwt_mq.create ~block_limit:0 () in
+    let s2c_sender_exit exn =
+      (*- Printf.eprintf "sw: s2c_sender_loop: exitting with %s\n%!"
+        (Printexc.to_string exn); -*)
+      shutdown client_conn ~exn Unix.SHUTDOWN_SEND;
+      Lwt_mq.close s2c_sender_mq exn ~on_recv:true;
+      Lwt_condition.signal stop_switch ();
+      return_unit
+    in
+    let rec s2c_sender_loop () =
+      (*- Printf.eprintf "sw: s2c_sender_loop: entered, mq: %s\n%!"
+        (Lwt_mq.dump s2c_sender_mq); -*)
+      match_lwt Lwt_mq.take_res s2c_sender_mq with
+      | `Ok msg -> begin
+           (*- Printf.eprintf "sw: s2c_sender_loop: msg from mq\n%!"; -*)
+           match_lwt send_res client_conn msg with
+           | `Ok () ->
+               (*- let (k, s) = Obj.magic msg in
+               Printf.eprintf "sw: s2c_sender_loop: sent: (%i, %S)\n%!" k s;
+               -*)
+               s2c_sender_loop ()
+           | `Error exn -> s2c_sender_exit exn
+        end
+      | `Error (Lwt_mq.Closed exn | exn) -> s2c_sender_exit exn
+    in
+    let s2c_loop key inner_conn =
+      let rec loop () =
+        (*- Printf.eprintf "sw: s2c_loop %i: entered\n%!" (Obj.magic key); -*)
+        if !closed_client_on_send <> None
+        then
+          return_unit
+        else
+          lwt inner_resp_res = recv_no_ack_res inner_conn in
+          (*- Printf.eprintf "sw: s2c_loop %i: recvd inner\n%!"
+               (Obj.magic key); -*)
+          begin match inner_resp_res, !closed_client_on_send with
+          | `Ok _, None -> ack inner_conn
+          | `Error exn, _ | _, Some exn ->
+              (*- Printf.eprintf "sw: s2c_loop %i: nack\n%!"
+                (Obj.magic key); -*)
+              shutdown ~exn inner_conn Unix.SHUTDOWN_RECEIVE
+          end;
+          if !closed_client_on_send <> None
+          then
+            return_unit
+          else begin
+            let outer_resp_res = combine key inner_resp_res in
+            match outer_resp_res with
+            | `Ok outer_resp -> begin
+                (*- Printf.eprintf "sw: s2c_loop %i: outer=Ok\n%!"
+                  (Obj.magic key); -*)
+                match_lwt Lwt_mq.put_res s2c_sender_mq outer_resp with
+                | `Ok () -> begin
+                    (*- Printf.eprintf "sw: s2c_loop %i: sent Ok\n%!"
+                      (Obj.magic key); -*)
+                    match inner_resp_res with
+                    | `Ok _ -> loop ()
+                    | `Error _ -> return_unit
+                  end
+                | `Error exn ->
+                    (*- Printf.eprintf
+                      "sw: s2c_loop %i: sent with error: %s\n%!"
+                      (Obj.magic key) (Printexc.to_string exn); -*)
+                    close_s2c_loops exn;
+                    return_unit
+              end
+            | `Error exn ->
+                (*- Printf.eprintf "sw: s2c_loop %i: outer=Er\n%!"
+                  (Obj.magic key); -*)
+                close_client_on_send exn;
+                return_unit
+          end
+      in
+        lwt () =
+          try_lwt
+            loop ()
+          with
+            exn ->
+              (*- Printf.eprintf "switch/s2c exn\n%!"; -*)
+              close ~exn inner_conn; return_unit
+        in
+        kmap := Kmap.remove key !kmap;
+        return_unit
+    in
+    ignore_result begin
+      s2c_sender_loop ()
+    end;
+    let stop_switch_waiter = Lwt_condition.wait stop_switch in
+    let rec loop () =
+      begin
+      match_lwt recv_no_ack_res client_conn with
+      | `Ok outer_req -> begin
+          match split outer_req with
+          | (key, inner_req) -> begin
+              let inner_conn =
+                match kmap_find_opt key !kmap with
+                | None ->
+                    let c = make_conn key in
+                    ignore_result begin
+                      (*- try -*)
+                      s2c_loop key c
+                      (*- with _ -> Printf.eprintf "s2c exn\n%!";
+                          return_unit -*)
+                    end;
+                    kmap := Kmap.add key c !kmap;
+                    c
+                | Some c -> c
+              in
+              match_lwt send_res inner_conn inner_req with
+              | `Ok () -> ack client_conn; ret_cont
+              | `Error exn ->
+                  return @@ `Stop exn
+          end
+        | exception exn -> return @@ `Stop exn
+        end
+      | `Error exn -> return @@ `Stop exn
+      end >>= function
+      | `Continue ->
+          (*- Printf.eprintf "switch/c2s: continue\n%!"; -*)
+          loop ()
+      | `Stop exn ->
+          (*- Printf.eprintf "switch/c2s: stopping with %s\n%!"
+            (Printexc.to_string exn); -*)
+          client_closed_on_recv := true;
+          Kmap.iter (fun _k c -> shutdown ~exn c Unix.SHUTDOWN_SEND) !kmap;
+          return_unit
+    in
+      (*- try_lwt -*)
+      lwt () = loop () in
+      begin try
+        Lwt_mq.close s2c_sender_mq End_of_file
+      with
+        Lwt_mq.Closed _ -> ()
+      end;
+      lwt () = stop_switch_waiter in
+      return_unit
+      (*- with _ -> Printf.eprintf "switch exn\n%!"; return_unit -*)
   end
