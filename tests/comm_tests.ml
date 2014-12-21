@@ -191,6 +191,70 @@ let switch_inner_close () =
   else
     assert false
 
+let thread_test () =
+  let module P = Lwt_preemptive in
+  let nthreads = ref 0 in
+  let nreqs = ref 0 in
+  let thread_func conn =
+    let tid = Thread.(id @@ self ()) in
+    (*- Printf.eprintf "thread_test: tid=%i\n%!" tid; -*)
+    incr nthreads;
+    let rec loop () =
+      match P.run_in_main @@ fun () -> recv conn with
+      | `Req t ->
+          incr nreqs;
+          Thread.delay t;
+          decr nreqs;
+          let () = P.run_in_main @@ fun () ->
+            send conn (t, tid)
+          in
+          loop ()
+      | `Stop ->
+          ()
+    in
+      loop ()
+  in
+  let (server, _ctl) = duplex @@ begin fun conn ->
+    lwt () = P.detach thread_func conn in
+    decr nthreads;
+    close conn;
+    return_unit
+  end in
+  assert (!nthreads = 0);
+  let c1 = connect server in
+  lwt () = Lwt_unix.sleep 0.01 in
+  assert (!nthreads = 1);
+  let c2 = connect server in
+  lwt () = Lwt_unix.sleep 0.01 in
+  assert (!nthreads = 2);
+  let sl1 = 0.025 in
+  let sl2 = 0.035 in
+  lwt () = send c1 @@ `Req sl1 in
+  lwt () = send c2 @@ `Req sl2 in
+  lwt () = Lwt_unix.sleep 0.01 in 
+  (* time left: 0.015±e, 0.025±e *)
+  assert (!nreqs = 2);
+  lwt () = Lwt_unix.sleep 0.01 in 
+  (* time left: 0.005±e, 0.015±e *)
+  assert (!nreqs = 2);
+  lwt () = Lwt_unix.sleep 0.01 in 
+  (* time left: none, 0.005±e *)
+  assert (!nreqs = 1);
+  lwt (rs1, tid1) = recv c1 in
+  assert (rs1 = sl1);
+  assert (!nreqs = 1);
+  lwt (rs2, tid2) = recv c2 in
+  assert (!nreqs = 0);
+  assert (rs2 = sl2);
+  assert (tid1 <> tid2);
+  lwt () = send c1 `Stop in
+  lwt () = Lwt_unix.sleep 0.01 in
+  assert (!nthreads = 1);
+  lwt () = send c2 `Stop in
+  lwt () = Lwt_unix.sleep 0.01 in
+  assert (!nthreads = 0);
+  return_unit
+
 let () = Lwt_main.run begin
   try_lwt
   (*- Printf.eprintf "\n\n\n\n\n\n\n\n%!"; -*)
@@ -207,6 +271,7 @@ let () = Lwt_main.run begin
       ; Reconnect_test.run
       ; switch_ok
       ; switch_inner_close
+      ; thread_test
       ]
   in
   print_endline "Lwt_comm tests passed ok.";
