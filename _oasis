@@ -34,5 +34,5 @@ Executable test_shutdown
 Executable comm_tests
   Path: tests
   MainIs: comm_tests.ml
-  BuildDepends: lwt_comm
+  BuildDepends: lwt_comm, threads, lwt.preemptive
   Install: false
