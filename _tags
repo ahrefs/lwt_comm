@@ -1,5 +1,5 @@
 # OASIS_START
-# DO NOT EDIT (digest: 6f05f500640c77698c4ae5bf410bdc8d)
+# DO NOT EDIT (digest: 07f509b1e308096ee73d76931cfc79a2)
 # Ignore VCS directories, you can use the same kind of rule outside
 # OASIS_START/STOP if you want to exclude directories that contains
 # useless stuff for the build process
@@ -19,20 +19,24 @@ true: annot, bin_annot
 <lib/*.ml{,i,y}>: pkg_lwt
 <lib/*.ml{,i,y}>: pkg_lwt.unix
 <lib/*.ml{,i,y}>: pkg_lwt_mq
+<lib/*.ml{,i,y}>: pkg_threads
 # Executable linenum_server
 "tests/linenum_server.byte": pkg_lwt
 "tests/linenum_server.byte": pkg_lwt.unix
 "tests/linenum_server.byte": pkg_lwt_mq
+"tests/linenum_server.byte": pkg_threads
 "tests/linenum_server.byte": use_lwt_comm
 # Executable linenum_client
 "tests/linenum_client.byte": pkg_lwt
 "tests/linenum_client.byte": pkg_lwt.unix
 "tests/linenum_client.byte": pkg_lwt_mq
+"tests/linenum_client.byte": pkg_threads
 "tests/linenum_client.byte": use_lwt_comm
 # Executable test_shutdown
 "tests/test_shutdown.byte": pkg_lwt
 "tests/test_shutdown.byte": pkg_lwt.unix
 "tests/test_shutdown.byte": pkg_lwt_mq
+"tests/test_shutdown.byte": pkg_threads
 "tests/test_shutdown.byte": use_lwt_comm
 # Executable comm_tests
 "tests/comm_tests.byte": pkg_lwt

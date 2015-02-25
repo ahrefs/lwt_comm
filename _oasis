@@ -6,7 +6,7 @@ Authors:     Dmitry Grebeniuk <gdsfh1@gmail.com>
 License:     LGPL-2.1 with OCaml linking exception
 Plugins:     META (0.4), StdFiles (0.4), DevFiles (0.4)
 BuildTools: ocamlbuild
-BuildDepends: lwt, lwt.unix, lwt_mq
+BuildDepends: lwt, lwt.unix, lwt_mq, threads
 
 Library lwt_comm
   Path:       lib

@@ -1,9 +1,9 @@
 # OASIS_START
-# DO NOT EDIT (digest: 53d3c3cb9467c28bac460225ad070c41)
+# DO NOT EDIT (digest: 5b644665e83e321615372754076d08d4)
 version = "0.1"
 description =
 "Lwt library used to implement typed bidirectional servers within process, and extend them to tcp/ip servers"
-requires = "lwt lwt.unix lwt_mq"
+requires = "lwt lwt.unix lwt_mq threads"
 archive(byte) = "lwt_comm.cma"
 archive(byte, plugin) = "lwt_comm.cma"
 archive(native) = "lwt_comm.cmxa"
