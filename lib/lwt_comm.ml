@@ -837,6 +837,9 @@ let reconnecting_server make_timeouts_stream (inner_server, inner_ctl) =
   end
 
 
+let res_of_exn func =
+  try `Ok (func ()) with e -> `Error e
+
 let switch (type k) ?(key_compare = Pervasives.compare)
  ~split ~combine make_conn =
   let module Key =
@@ -952,8 +955,8 @@ let switch (type k) ?(key_compare = Pervasives.compare)
       begin
       match_lwt recv_no_ack_res client_conn with
       | `Ok outer_req -> begin
-          match split outer_req with
-          | (key, inner_req) -> begin
+          match res_of_exn @@ fun () -> split outer_req with
+          | `Ok (key, inner_req) -> begin
               let inner_conn =
                 match kmap_find_opt key !kmap with
                 | None ->
@@ -973,7 +976,7 @@ let switch (type k) ?(key_compare = Pervasives.compare)
               | `Error exn ->
                   return @@ `Stop exn
           end
-        | exception exn -> return @@ `Stop exn
+        | `Error exn -> return @@ `Stop exn
         end
       | `Error exn -> return @@ `Stop exn
       end >>= function
