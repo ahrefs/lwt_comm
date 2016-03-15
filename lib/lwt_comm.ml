@@ -277,12 +277,12 @@ let shutdown_server_wait ?(exn = Server_shut_down)
   let shutdown_return () =
     sctl.sc_state <- Ss_closed exn;
     Lazy.force sctl.sc_shtd;
-    lwt () = sctl.sc_shtd_waiter in
+    lwt () = sctl.sc_shtd_waiter in  (* can be cancelled at [on_shutdown ()] *)
     return (begin
       match wait with
       | Time _ -> `Shut_down
       | Forever -> ()
-      | Don't -> 0
+      | Don't -> sctl.instances (* = 0 *)
     end : a)
   in
   if sctl.instances = 0
@@ -290,45 +290,47 @@ let shutdown_server_wait ?(exn = Server_shut_down)
     shutdown_return ()
   else
     let do_wait timeout_waiter =
-      let (cond, close_waiter_ref) =
-        match sctl.sc_state with
-        | Ss_closed _exn -> assert false
-            (* if server is closed, instances=0,
-               this if-branch is unreachable. *)
-        | Ss_running ->
-            let cond = Lwt_condition.create () in
-            let close_waiter_ref = ref (Lwt_condition.wait cond) in
-            sctl.sc_state <- Ss_closing (exn, cond, close_waiter_ref);
-            (cond, close_waiter_ref)
-        | Ss_closing (_old_exn, cond, close_waiter_ref) ->
-            sctl.sc_state <- Ss_closing (exn, cond, close_waiter_ref);
-            (cond, close_waiter_ref)
-      in
-      let rec loop () =
-        assert (sctl.instances > 0);
-        (* Printf.eprintf "shutdown_server_wait loop, %i more instances\n%!"
-          sctl.instances; *)
-        let close_waiter = !close_waiter_ref >|= fun () -> `Conn_closed in
-        lwt event = choose [timeout_waiter; close_waiter] in
-        let insts = sctl.instances in
-        match event with
-        | `Timeout -> return begin
-            match wait with
-            | Don't -> assert false
-            | Forever -> assert false
-            | Time _ -> (`Instances_exist insts : a)
-          end
-        | `Conn_closed ->
-            if insts = 0
-            then begin
-              cancel timeout_waiter;
-              shutdown_return ()
-            end else begin
-              close_waiter_ref := Lwt_condition.wait cond;
-              loop ()
+      try_lwt
+        let (cond, close_waiter_ref) =
+          match sctl.sc_state with
+          | Ss_closed _exn -> assert false
+              (* if server is closed, instances=0,
+                 this if-branch is unreachable. *)
+          | Ss_running ->
+              let cond = Lwt_condition.create () in
+              let close_waiter_ref = ref (Lwt_condition.wait cond) in
+              sctl.sc_state <- Ss_closing (exn, cond, close_waiter_ref);
+              (cond, close_waiter_ref)
+          | Ss_closing (_old_exn, cond, close_waiter_ref) ->
+              sctl.sc_state <- Ss_closing (exn, cond, close_waiter_ref);
+              (cond, close_waiter_ref)
+        in
+        let rec loop () =
+          let insts = sctl.instances in
+          assert (insts > 0);
+          (* Printf.eprintf "shutdown_server_wait loop, %i more instances\n%!"
+               insts; *)
+          let close_waiter = !close_waiter_ref >|= fun () -> `Conn_closed in
+          match_lwt choose [timeout_waiter; protected close_waiter] with
+          | `Timeout -> return begin
+              match wait with
+              | Don't -> assert false
+              | Forever -> assert false
+              | Time _ -> (`Instances_exist insts : a)
             end
-      in
-        loop ()
+          | `Conn_closed ->
+              if insts = 0
+              then begin
+                shutdown_return ()
+              end else begin
+                close_waiter_ref := Lwt_condition.wait cond;
+                loop ()
+              end
+        in
+          loop ()
+      finally
+        cancel timeout_waiter;
+        return_unit
     in
     match wait with
     | Don't -> return (sctl.instances : a)
@@ -354,7 +356,7 @@ let shutdown_server_wait_infinite ?(exn = Server_shut_down) sctl =
   shutdown_server_wait ~exn sctl Forever
 
 let wait_for_server_shutdown sctl =
-  sctl.sc_shtd_waiter
+  protected sctl.sc_shtd_waiter
 
 let run_lwt_server server server_conn =
   let ctl = server.sctl in
@@ -508,7 +510,7 @@ let run_unix_server
   Lwt_unix.bind sock sock_addr;
   Lwt_unix.listen sock listen;
   let shutdown_waiter =
-    lwt () = server.sctl.sc_shtd_waiter in
+    lwt () = wait_for_server_shutdown server.sctl in
     return `Shutdown
   in
   ignore_result begin try_lwt begin
