@@ -451,6 +451,24 @@ let next_conn_id =
   let cur = ref 0 in
   fun () -> (incr cur; !cur)
 
+let log_exn exn fmt =
+  Printf.ksprintf begin fun s ->
+      Printf.eprintf "%i: %s: %s\n%!"
+        (Unix.getpid ()) s (Printexc.to_string exn);
+    end
+    fmt
+
+let async place func =
+  Lwt.async begin fun () ->
+    try_lwt
+      func ()
+    with exn ->
+      log_exn exn
+        "uncaught exception from Lwt_comm.%s background thread"
+        place;
+      return_unit
+  end
+
 let connect
  : ?ack_req:bool -> ?ack_resp:bool ->
    ('req, 'resp, [> `Connect] as 'k) server ->
@@ -464,10 +482,8 @@ let connect
         conn_pair ~ack_req ~ack_resp on_conn_close in
       let closefunc exn = close client_conn ~exn in
       Hashtbl.add server.sctl.conns conn_id closefunc;
-      Lwt.ignore_result begin
-        (*- try_lwt -*)
-          run_lwt_server server server_conn
-        (*- with e -> Printf.eprintf "connect/run error\n%!"; fail e -*)
+      async "connect" begin fun () ->
+        run_lwt_server server server_conn
       end;
       client_conn
   | Ss_closed exn | Ss_closing (exn, _, _) -> raise exn
@@ -484,20 +500,26 @@ type (+'req, -'resp, 'k) unix_func =
   ('req, 'resp, 'k) conn -> Lwt_unix.file_descr -> unit Lwt.t
 
 let run_unix_func func conn fd =
-  ignore_result begin
-    (*- Printf.eprintf "run unix func: 0\n%!"; -*)
-    lwt () = func conn fd in
-    (*- Printf.eprintf "run unix func: 1\n%!"; -*)
-    close conn;
-    (*- Printf.eprintf "run unix func: 2\n%!"; -*)
-    lwt () =
+  async "run_unix_func" begin fun () ->
+    try_lwt
+      (*- Printf.eprintf "run unix func: 0\n%!"; -*)
+      lwt () =
+        try_lwt
+          func conn fd
+        finally
+          (*- Printf.eprintf "run unix func: 1\n%!"; -*)
+          close conn;
+          return_unit
+      in
+      (*- Printf.eprintf "run unix func: 2\n%!"; -*)
+      return_unit
+    finally
       if Lwt_unix.state fd = Lwt_unix.Closed
-      then return_unit
-      else Lwt_unix.close fd
-    in
-    (*- Printf.eprintf "run unix func: 3\n%!"; -*)
-    return_unit
-  end
+      then
+        return_unit
+      else
+        try_lwt Lwt_unix.close fd with _ (* todo logging *) -> return_unit
+    end
 
 let run_unix_server
  (server : ('req, 'resp, [> `Bidi] as 'k) server)
@@ -513,7 +535,7 @@ let run_unix_server
     lwt () = wait_for_server_shutdown server.sctl in
     return `Shutdown
   in
-  ignore_result begin try_lwt begin
+  async "run_unix_server" begin fun () -> try_lwt begin
     let rec loop () =
       lwt ready = nchoose
         [ begin
@@ -542,8 +564,7 @@ let run_unix_server
       loop ()
   end
   with e ->
-    Printf.eprintf "run unix server exn: %s\n%!"
-      (Printexc.to_string e);
+    log_exn e "run unix server";
     return_unit
   finally
     Lwt_unix.close sock
@@ -640,8 +661,7 @@ let unix_func_of_maps
       in
         loop [make_inch_reader (); make_conn_reader ()]
     with e ->
-      Printf.eprintf "unix func of maps: %s\n%!"
-        (Printexc.to_string e);
+      log_exn e "unix func of maps";
       return_unit
 
 let connect_unix_on_close = Lazy.from_val ()
@@ -949,9 +969,7 @@ let switch (type k) ?(key_compare = Pervasives.compare)
         kmap := Kmap.remove key !kmap;
         return_unit
     in
-    ignore_result begin
-      s2c_sender_loop ()
-    end;
+    async "switch/s2c_sender_loop" s2c_sender_loop;
     let stop_switch_waiter = Lwt_condition.wait stop_switch in
     let rec loop () =
       begin
@@ -963,11 +981,8 @@ let switch (type k) ?(key_compare = Pervasives.compare)
                 match kmap_find_opt key !kmap with
                 | None ->
                     let c = make_conn key in
-                    ignore_result begin
-                      (*- try -*)
+                    async "switch/s2c_loop" begin fun () ->
                       s2c_loop key c
-                      (*- with _ -> Printf.eprintf "s2c exn\n%!";
-                          return_unit -*)
                     end;
                     kmap := Kmap.add key c !kmap;
                     c
