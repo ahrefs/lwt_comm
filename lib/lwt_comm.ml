@@ -451,10 +451,15 @@ let next_conn_id =
   let cur = ref 0 in
   fun () -> (incr cur; !cur)
 
+let log_ str =
+  Printf.eprintf "%i: %s\n%!" (Unix.getpid ()) str
+
+let log fmt =
+  Printf.ksprintf log_ fmt
+
 let log_exn exn fmt =
   Printf.ksprintf begin fun s ->
-      Printf.eprintf "%i: %s: %s\n%!"
-        (Unix.getpid ()) s (Printexc.to_string exn);
+      log "%s: %s" s (Printexc.to_string exn);
     end
     fmt
 
@@ -1018,3 +1023,31 @@ let switch (type k) ?(key_compare = Pervasives.compare)
       return_unit
       (*- with _ -> Printf.eprintf "switch exn\n%!"; return_unit -*)
   end
+
+(* TEMP *)
+
+let wait_group name ths =
+  log "wait_group %S, %i threads" name (List.length ths);
+  let ths = List.mapi begin fun i th ->
+      let th =
+        try_lwt
+          lwt () = th in
+          log "wait_group %S, thread #%i exited ok" name i;
+          return (i, `Ok)
+        with exn ->
+          log_exn exn "wait_group %S, thread #%i failed" name i;
+          return (i, `Error exn)
+      in
+        th
+    end
+    ths
+  in
+  try_lwt
+    lwt (ready, res) = choose ths in
+    log "wait_group %S, thread #%i finished: %s" name ready
+      (match res with `Ok -> "ok" | `Error exn -> Printexc.to_string exn);
+    List.iter cancel ths;
+    fail (Failure (Printf.sprintf "wait_group %S: stopped" name))
+  with exn ->
+    log_exn exn "wait_group %S loop" name;
+    fail exn

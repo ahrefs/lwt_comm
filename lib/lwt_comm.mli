@@ -282,3 +282,7 @@ val switch :
     so use this in short tests only. *)
 val set_conn_name : ('a, 'b, 'c) conn -> string -> unit
 val conn_name : ('a, 'b, 'c) conn -> string
+
+
+(* TEMP *)
+val wait_group : string -> unit Lwt.t list -> unit Lwt.t
