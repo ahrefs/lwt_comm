@@ -53,6 +53,18 @@ type (-'req, +'resp, 'kind) server =
   ; sctl : server_ctl
   }
 
+let log_ str =
+  Printf.eprintf "%i: %s\n%!" (Unix.getpid ()) str
+
+let log fmt =
+  Printf.ksprintf log_ fmt
+
+let log_exn exn fmt =
+  Printf.ksprintf begin fun s ->
+      log "%s: %s" s (Printexc.to_string exn);
+    end
+    fmt
+
 let conn_names = ref []
 
 let conn_name c =
@@ -275,6 +287,7 @@ type _ wait =
 let shutdown_server_wait ?(exn = Server_shut_down)
   sctl (type a) (wait : a wait) : a Lwt.t =
   let shutdown_return () =
+    log_exn exn "closing server";
     sctl.sc_state <- Ss_closed exn;
     Lazy.force sctl.sc_shtd;
     lwt () = sctl.sc_shtd_waiter in  (* can be cancelled at [on_shutdown ()] *)
@@ -343,11 +356,9 @@ let shutdown_server_wait ?(exn = Server_shut_down)
     | Forever -> do_wait (let (wai, _wak) = task () in wai)
 
 let shutdown_server ?(exn = Server_shut_down) sctl =
-  (*-
-  Printf.eprintf
+  log_exn exn
     "shutdown_server: conns: %i instances: %i\n%!"
     (Hashtbl.length sctl.conns) sctl.instances;
-  -*)
   Hashtbl.iter (fun _cid closefunc -> closefunc exn) sctl.conns;
   Hashtbl.clear sctl.conns;
   shutdown_server_wait ~exn sctl Forever
@@ -450,18 +461,6 @@ let map_server map_req map_resp server =
 let next_conn_id =
   let cur = ref 0 in
   fun () -> (incr cur; !cur)
-
-let log_ str =
-  Printf.eprintf "%i: %s\n%!" (Unix.getpid ()) str
-
-let log fmt =
-  Printf.ksprintf log_ fmt
-
-let log_exn exn fmt =
-  Printf.ksprintf begin fun s ->
-      log "%s: %s" s (Printexc.to_string exn);
-    end
-    fmt
 
 let async place func =
   Lwt.async begin fun () ->
